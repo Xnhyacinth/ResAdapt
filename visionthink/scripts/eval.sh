@@ -75,10 +75,15 @@ elif [[ "$task_type" == *"video"* ]]; then
     tasks="videomme,longvideobench_val_v,video_mmmu,lvbench,mmvu_val"
     # tasks="mmvu_val"
     if [[ "$task_type" == *"all"* ]]; then
-        tasks="videomme,longvideobench_val_v,mlvu_dev,mlvu_test,egoschema_subset,lvbench,video_mmmu,mmvu_val,activitynettvg,charades,nextgqa" #mvbench
+        # tasks="videomme,longvideobench_val_v,mlvu_dev,mlvu_test,egoschema_subset,lvbench,video_mmmu,mmvu_val,activitynettvg,charades,nextgqa" #mvbench
+        tasks="videomme,longvideobench_val_v,video_mmmu,lvbench,mmvu_val,mlvu_dev,activitynettvg,charades,nextgqa,youcook2_val" #mvbench
+    elif [[ "$task_type" == *"add"* ]]; then
+        # tasks="mlvu_dev,mlvu_test,egoschema_subset,activitynettvg,charades,nextgqa" #mvbench
+        tasks="mlvu_dev,activitynettvg,charades,nextgqa,youcook2_val" #mvbench
     fi
 else
-    tasks="mmmu_val,chartqa,docvqa_val,ai2d,gqa,realworldqa,textvqa_val,mathvista_testmini,mathvision_testmini,ocrbench"
+    # tasks="mmmu_val,chartqa,docvqa_val,ai2d,gqa,realworldqa,textvqa_val,mathvista_testmini,mathvision_testmini,ocrbench"
+    tasks="mmmu_val,chartqa,mathvista_testmini,mathvision_testmini,ocrbench,textvqa_val,ai2d"
     # tasks="mmmu_val,chartqa,mmbench_en_dev,pope,mme" # mmvet mathverse_testmini
 fi
 
@@ -137,6 +142,8 @@ elif [ "$conv_template" == "qwen2_5_vl_autothink" ]; then
     model_args="${model_args},inference_mode=auto,early_exit_thresh=0.97,video_min_pixels=$video_min_pixels,video_max_pixels=$video_max_pixels,video_total_pixels=$video_total_pixels,max_frames=$max_num_frames,image_min_pixels=$image_min_pixels,image_max_pixels=$image_max_pixels"
 elif [ "$conv_template" == "qwen2_vl" ]; then
     model_type="qwen2_vl"
+elif [ "$conv_template" == "qwen3_vl" ]; then
+    model_type="qwen3_vl"
 elif [[ "$conv_template" == *"vllm"* ]]; then
     export TORCH_NCCL_BLOCKING_WAIT=1
     export NCCL_TIMEOUT=18000000
@@ -351,6 +358,8 @@ if [[ "$model_type" == *"qwen2_5_vl"* ]]; then
     model_args="${model_args},interleave_visuals=False" # ,max_pixels=${video_max_pixels} ,max_pixels=12845056
 elif [[ "$model_type" == *"qwen2_vl"* ]]; then
     model_args="${model_args},max_pixels=${video_max_pixels}" # ,max_pixels=2359296
+elif [[ "$model_type" == *"qwen3_vl"* ]]; then
+    model_args="${model_args},interleave_visuals=False,max_pixels=${video_max_pixels}"
 elif [[ "$model_name" == *"llava_"* ]]; then
     model_args="${model_args},model_name=${model_name},conv_template=${conv_template}"
 fi
@@ -364,7 +373,33 @@ elif [ "$conv_template" == "qwen2_vl" ]; then
     model_type="${model_type}_custom"
 fi
 
-if [[ "$sa_pattern" == *"quadtree"* ]]; then
+if [[ "$sa_pattern" == *"flashvid"* && "$conv_template" != *"vllm"* ]]; then
+    DO_SEGMENT=True
+    MIN_SEGMENT_NUM=4
+    COMPLEMENTARY_SEGMENT=True
+    TOKEN_SELECTION_METHOD=attn_div
+    ALPHA=0.70
+    TEMPORAL_THRESHOLD=0.8
+    EXPANSION=1.25
+    PRUNING_LAYER=20
+    LLM_RETENTION_RATIO=0.3
+
+    if [[ "$model" == *"Qwen3"* || "$conv_template" == "qwen_3" || "$conv_template" == "qwen3_vl" ]]; then
+        PRUNING_LAYER=28
+        LLM_RETENTION_RATIO=0.1
+    fi
+
+    retention_ratio=${sa_ratio}
+    if [ "$retention_ratio" == "0" ]; then
+        if [ -n "$FLASHVID_RATIO" ]; then
+            retention_ratio=${FLASHVID_RATIO}
+        else
+            retention_ratio=0.25
+        fi
+    fi
+    model_args="${model_args},enable_flashvid=True,retention_ratio=${retention_ratio},do_segment=${DO_SEGMENT},min_segment_num=${MIN_SEGMENT_NUM},complementary_segment=${COMPLEMENTARY_SEGMENT},token_selection_method=${TOKEN_SELECTION_METHOD},alpha=${ALPHA},temporal_threshold=${TEMPORAL_THRESHOLD},expansion=${EXPANSION},pruning_layer=${PRUNING_LAYER},llm_retention_ratio=${LLM_RETENTION_RATIO}"
+
+elif [[ "$sa_pattern" == *"quadtree"* ]]; then
     if [ "$sa_ratio" == "0.05" ]; then
         threshold=0.65
         sa_tree_temporal_thresh=0.49

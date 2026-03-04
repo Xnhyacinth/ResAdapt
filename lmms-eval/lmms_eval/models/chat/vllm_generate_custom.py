@@ -1,3 +1,4 @@
+import json
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -192,17 +193,27 @@ class VLLMGenerateCustom(VLLMChat):
         min_image_pixels=28,
         fps: Optional[int] = None,
         nframes: Optional[int] = 32,
+        log_visual_len: Optional[bool] = None,
         **kwargs,
     ):
         self.predictor_path = os.getenv("PREDICTOR_PATH", None)
         self.enable_baseline_scale = env_true("ENABLE_BASELINE_SCALE")
+        if log_visual_len is None:
+            self.log_visual_len = env_true("LOG_VISUAL_LEN")
+        elif isinstance(log_visual_len, str):
+            self.log_visual_len = str(log_visual_len).lower() in ("1", "true", "yes", "y", "t")
+        else:
+            self.log_visual_len = bool(log_visual_len)
+        print(f"[VLLMGenerateCustom] log_visual_len: {self.log_visual_len}")
+        
         try:
             self.baseline_scale_factor = float(os.getenv("BASELINE_SCALE_FACTOR", "1.0"))
         except Exception:
             self.baseline_scale_factor = 1.0
         self.add_sys = env_true("ADD_SYS")
-        self.log_visual_len = env_true("LOG_VISUAL_LEN")
         self.scale_preprocess_retries = int(os.getenv("SCALE_PREPROCESS_RETRIES", "2"))
+        self.scale_preprocess_timeout_s = int(os.getenv("SCALE_PREPROCESS_TIMEOUT_S", "21600"))
+        self.scale_preprocess_chunk_size = int(os.getenv("SCALE_PREPROCESS_CHUNK_SIZE", "30000"))
         self.workers = int(os.getenv("WORKERS", str(WORKERS)))
         self.micro_batch = int(os.getenv("MICRO_BATCH", str(MICRO_BATCH)))
         self.max_inflight_per_gpu = int(os.getenv("max_inflight_per_gpu", str(max_inflight_per_gpu)))
@@ -228,6 +239,17 @@ class VLLMGenerateCustom(VLLMChat):
         )
         self.pool = None
         self.scale_preprocess_failures: List[Tuple[str, str]] = []
+        self._predictor_scales_cache_base: Optional[str] = None
+        self._predictor_scales_cache_loaded: Dict[str, bool] = {}
+        self._predictor_scales_cache_mem: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self._predictor_scales_cache_frames = int(self._pool_kwargs.get("max_frames", max_frame_num))
+        if self.predictor_path is not None:
+            try:
+                expanded = os.path.expanduser(self.predictor_path)
+                if os.path.isdir(expanded):
+                    self._predictor_scales_cache_base = os.path.join(expanded, "benchmarks")
+            except Exception:
+                self._predictor_scales_cache_base = None
 
         # Only rank 0 starts predictor pool to avoid GPU competition
         if self._is_main_rank and self.predictor_path is not None:
@@ -282,6 +304,172 @@ class VLLMGenerateCustom(VLLMChat):
 
         self.patch_size = self.processor.image_processor.patch_size
         self.image_factor = self.processor.video_processor.merge_size * self.patch_size
+
+    def _sanitize_benchmark_name(self, name: str) -> str:
+        name = str(name)
+        name = name.replace(os.sep, "_")
+        name = name.replace("..", "_")
+        return name
+
+    def _predictor_scales_cache_key(self, benchmark: str) -> str:
+        bench = self._sanitize_benchmark_name(benchmark)
+        return f"{bench}::frames{self._predictor_scales_cache_frames}"
+
+    def _scale_entry_jsonable(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        def _to_jsonable(obj: Any) -> Any:
+            if obj is None:
+                return None
+            if hasattr(obj, "tolist"):
+                try:
+                    return obj.tolist()
+                except Exception:
+                    pass
+            try:
+                import torch
+                if torch.is_tensor(obj):
+                    return obj.detach().cpu().tolist()
+            except Exception:
+                pass
+            if isinstance(obj, dict):
+                return {k: _to_jsonable(v) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                return [_to_jsonable(v) for v in obj]
+            if isinstance(obj, (int, float, str, bool)):
+                return obj
+            return str(obj)
+
+        return {
+            "scale_mask": _to_jsonable(entry.get("scale_mask", None)),
+            "scales": _to_jsonable(entry.get("scales", None)),
+        }
+
+    def _compute_scale_means_from_scales(self, scales: Any) -> float:
+        vals: List[float] = []
+        if hasattr(scales, "tolist"):
+            try:
+                scales = scales.tolist()
+            except Exception:
+                pass
+        if isinstance(scales, (int, float)):
+            vals.append(float(scales))
+        elif isinstance(scales, (list, tuple)):
+            def _flatten(x: Any) -> None:
+                if isinstance(x, (int, float)):
+                    vals.append(float(x))
+                    return
+                if isinstance(x, (list, tuple)):
+                    for y in x:
+                        _flatten(y)
+            _flatten(scales)
+        return float(sum(vals) / len(vals)) if vals else 1.0
+
+    def _cache_entry_to_runtime_entry(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        scales = entry.get("scales", None)
+        scale_mask = entry.get("scale_mask", None)
+        return {
+            "scale_means": self._compute_scale_means_from_scales(scales) if scales is not None else 1.0,
+            "scale_mask": scale_mask,
+            "scales": scales,
+        }
+
+    def _load_predictor_scales_cache(self, benchmark: str) -> Dict[str, Dict[str, Any]]:
+        if self._predictor_scales_cache_base is None:
+            return {}
+        cache_key = self._predictor_scales_cache_key(benchmark)
+        if self._predictor_scales_cache_loaded.get(cache_key, False):
+            return self._predictor_scales_cache_mem.get(cache_key, {})
+        cache: Dict[str, Dict[str, Any]] = {}
+        try:
+            bench = self._sanitize_benchmark_name(benchmark)
+            bench_dir = os.path.join(self._predictor_scales_cache_base, bench)
+            cache_file = os.path.join(bench_dir, f"scales_{self._predictor_scales_cache_frames}.jsonl")
+            if os.path.exists(cache_file):
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            payload = json.loads(line)
+                        except Exception:
+                            continue
+                        key = payload.get("key", None)
+                        entry = payload.get("entry", None)
+                        if not isinstance(key, str) or not isinstance(entry, dict):
+                            continue
+                        if entry.get("scales", None) is None:
+                            continue
+                        cache[key] = self._cache_entry_to_runtime_entry(entry)
+        except Exception:
+            cache = {}
+        self._predictor_scales_cache_mem[cache_key] = cache
+        self._predictor_scales_cache_loaded[cache_key] = True
+        return cache
+
+    def _append_predictor_scales_cache(self, benchmark: str, entries: Dict[str, Dict[str, Any]]) -> None:
+        if self._predictor_scales_cache_base is None:
+            return
+        if not entries:
+            return
+        bench = self._sanitize_benchmark_name(benchmark)
+        bench_dir = os.path.join(self._predictor_scales_cache_base, bench)
+        os.makedirs(bench_dir, exist_ok=True)
+        cache_file = os.path.join(bench_dir, f"scales_{self._predictor_scales_cache_frames}.jsonl")
+        cache_mem = self._load_predictor_scales_cache(bench)
+        try:
+            with open(cache_file, "a", encoding="utf-8") as f:
+                for key, entry in entries.items():
+                    if not isinstance(key, str) or not isinstance(entry, dict):
+                        continue
+                    if key in cache_mem:
+                        continue
+                    if entry.get("scales", None) is None:
+                        continue
+                    jsonable = self._scale_entry_jsonable(entry)
+                    f.write(json.dumps({"key": key, "entry": jsonable}, ensure_ascii=False) + "\n")
+                    cache_mem[key] = self._cache_entry_to_runtime_entry(jsonable)
+        except Exception:
+            return
+
+    def _get_scales_with_disk_cache(self, payloads: List[dict], keys: List[str]) -> Dict[str, Dict[str, Any]]:
+        if self.predictor_path is None or self._predictor_scales_cache_base is None or not keys:
+            return self._submit_payloads_with_retries(payloads, keys)
+        cached: Dict[str, Dict[str, Any]] = {}
+        missing_payloads: List[dict] = []
+        missing_keys: List[str] = []
+        for key, payload in zip(keys, payloads):
+            task = None
+            if isinstance(payload, dict):
+                task = payload.get("_task", None)
+            if not isinstance(task, str) and isinstance(key, str) and "::" in key:
+                task = key.split("::", 1)[0]
+            if not isinstance(task, str) or not task:
+                missing_payloads.append(payload)
+                missing_keys.append(key)
+                continue
+            cache = self._load_predictor_scales_cache(task)
+            hit = cache.get(key, None)
+            if isinstance(hit, dict) and hit.get("scales", None) is not None:
+                cached[key] = hit
+            else:
+                missing_payloads.append(payload)
+                missing_keys.append(key)
+        predicted: Dict[str, Dict[str, Any]] = {}
+        if missing_keys:
+            predicted = self._submit_payloads_with_retries(missing_payloads, missing_keys)
+            by_task: Dict[str, Dict[str, Dict[str, Any]]] = {}
+            for key, entry in predicted.items():
+                if not isinstance(entry, dict) or entry.get("scales", None) is None:
+                    continue
+                task = key.split("::", 1)[0] if isinstance(key, str) and "::" in key else None
+                if not isinstance(task, str) or not task:
+                    continue
+                by_task.setdefault(task, {})[key] = entry
+            for task, task_entries in by_task.items():
+                self._append_predictor_scales_cache(task, task_entries)
+        out = dict(cached)
+        out.update(predicted)
+        return out
 
     def _check_gpu_available(self, min_free_gb: float = 1.0) -> bool:
         """Check if GPUs are available with sufficient free memory.
@@ -574,10 +762,20 @@ class VLLMGenerateCustom(VLLMChat):
         if videos is not None:
             proc_kwargs["videos"] = videos
             if video_metadatas is not None:
-                proc_kwargs["videos_kwargs"] = {"video_metadata": video_metadatas, "do_sample_frames": False}
+                if isinstance(video_metadatas, (list, tuple)):
+                    cleaned_metadatas = []
+                    for meta in video_metadatas:
+                        if isinstance(meta, dict) and "video_timestamps" in meta:
+                            cleaned_metadatas.append({k: v for k, v in meta.items() if k != "video_timestamps"})
+                        else:
+                            cleaned_metadatas.append(meta)
+                    proc_kwargs["videos_kwargs"] = {"video_metadata": cleaned_metadatas, "do_sample_frames": False}
+                else:
+                    proc_kwargs["videos_kwargs"] = {"video_metadata": video_metadatas, "do_sample_frames": False}
         try:
             outputs = self.processor(text=[text], **proc_kwargs)
         except Exception:
+            print(f"[VLLMGenerateCustom] Warning: Failed to process text: {text}")
             return None
         merge_size = getattr(self.processor.image_processor, "merge_size", 1)
         merge_len = int(merge_size) ** 2 if merge_size else 1
@@ -618,6 +816,7 @@ class VLLMGenerateCustom(VLLMChat):
                 pad_count = image_pad_count + video_pad_count
                 return max(int(len(full_ids[0]) - len(text_only) + pad_count), 0)
         except Exception:
+            print(f"[VLLMGenerateCustom] Warning: Failed to compute visual length for text: {text}")
             return None
         return None
 
@@ -665,40 +864,51 @@ class VLLMGenerateCustom(VLLMChat):
         attempt = 0
         mismatch_count = 0
         while pending_payloads and attempt <= self.scale_preprocess_retries:
-            outs = self.pool.submit_many_sync(pending_payloads, timeout=9600)
-            next_payloads: List[dict] = []
-            next_keys: List[str] = []
-            for i, out in enumerate(outs):
-                compound = pending_keys[i]
-                if isinstance(out, Exception):
-                    next_payloads.append(pending_payloads[i])
-                    next_keys.append(compound)
-                    self.scale_preprocess_failures.append((compound, str(out)))
-                    print(f"[VLLMGenerateCustom] Scale preprocess error (attempt={attempt}) {compound}: {out}")
+            timeout_s = int(self.scale_preprocess_timeout_s) * max(1, attempt + 1)
+            chunk_size = max(1, int(self.scale_preprocess_chunk_size))
+            next_payloads = []
+            next_keys = []
+            for start in range(0, len(pending_payloads), chunk_size):
+                chunk_payloads = pending_payloads[start : start + chunk_size]
+                chunk_keys = pending_keys[start : start + chunk_size]
+                try:
+                    outs = self.pool.submit_many_sync(chunk_payloads, timeout=timeout_s)
+                except Exception as e:
+                    print(f"[VLLMGenerateCustom] Scale preprocess batch exception (attempt={attempt}) size={len(chunk_keys)}: {e}")
+                    for ck, cp in zip(chunk_keys, chunk_payloads):
+                        next_payloads.append(cp)
+                        next_keys.append(ck)
+                        self.scale_preprocess_failures.append((ck, str(e)))
                     continue
-                if isinstance(out, dict) and not out.get("ok", True):
-                    err = out.get("err", "unknown")
-                    retry = out.get("retry", True)
-                    self.scale_preprocess_failures.append((compound, str(err)))
-                    if retry:
-                        next_payloads.append(pending_payloads[i])
+                for i, out in enumerate(outs):
+                    compound = chunk_keys[i]
+                    if isinstance(out, Exception):
+                        next_payloads.append(chunk_payloads[i])
                         next_keys.append(compound)
-                        print(f"[VLLMGenerateCustom] Scale preprocess retry (attempt={attempt}) {compound}: {err}")
-                    else:
-                        print(f"[VLLMGenerateCustom] Scale preprocess failed (no-retry) {compound}: {err}")
-                    continue
-                ret_compound = out.get("_compound_id", compound) if isinstance(out, dict) else compound
-                if ret_compound != compound:
-                    mismatch_count += 1
-                    if mismatch_count <= 5:
-                        print(f"[VLLMGenerateCustom] WARNING: compound mismatch expected={compound} got={ret_compound}")
-                    # Note: Use original compound key, not ret_compound, to ensure proper matching
-                # Always use original compound key for results storage
-                results[compound] = {
-                    "scale_means": out.get("scale_means", 1.0),
-                    "scale_mask": out.get("scale_mask", None),
-                    "scales": out.get("scales", None),
-                }
+                        self.scale_preprocess_failures.append((compound, str(out)))
+                        print(f"[VLLMGenerateCustom] Scale preprocess error (attempt={attempt}) {compound}: {out}")
+                        continue
+                    if isinstance(out, dict) and not out.get("ok", True):
+                        err = out.get("err", "unknown")
+                        retry = out.get("retry", True)
+                        self.scale_preprocess_failures.append((compound, str(err)))
+                        if retry:
+                            next_payloads.append(chunk_payloads[i])
+                            next_keys.append(compound)
+                            print(f"[VLLMGenerateCustom] Scale preprocess retry (attempt={attempt}) {compound}: {err}")
+                        else:
+                            print(f"[VLLMGenerateCustom] Scale preprocess failed (no-retry) {compound}: {err}")
+                        continue
+                    ret_compound = out.get("_compound_id", compound) if isinstance(out, dict) else compound
+                    if ret_compound != compound:
+                        mismatch_count += 1
+                        if mismatch_count <= 5:
+                            print(f"[VLLMGenerateCustom] WARNING: compound mismatch expected={compound} got={ret_compound}")
+                    results[compound] = {
+                        "scale_means": out.get("scale_means", 1.0),
+                        "scale_mask": out.get("scale_mask", None),
+                        "scales": out.get("scales", None),
+                    }
             pending_payloads = next_payloads
             pending_keys = next_keys
             attempt += 1
@@ -739,8 +949,7 @@ class VLLMGenerateCustom(VLLMChat):
             compound_key, payload = self._prepare_scale_payload(req)
             payloads.append(payload)
             keys.append(compound_key)
-            
-        return self._submit_payloads_with_retries(payloads, keys)
+        return self._get_scales_with_disk_cache(payloads, keys)
 
 
     def _make_one_request_with_scale(
@@ -1000,7 +1209,7 @@ class VLLMGenerateCustom(VLLMChat):
                 # 2. Run predictor pool on all gathered payloads
                 try:
                     t0 = time.time()
-                    all_scales_dict = self._submit_payloads_with_retries(all_payloads, all_keys)
+                    all_scales_dict = self._get_scales_with_disk_cache(all_payloads, all_keys)
                     scale_preprocess_s = time.time() - t0
                     print(f"[VLLMGenerateCustom] [Rank 0] Scale preprocessing took {scale_preprocess_s:.2f}s for {len(all_keys)} gathered items")
                 except Exception as e:

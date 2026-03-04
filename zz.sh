@@ -1,21 +1,21 @@
 
-bash visionthink/scripts/eval.sh Qwen/Qwen2.5-VL-7B-Instruct vllm_generate video_all 32 0 0 0 0 logs_eval len_fix0.35
+# bash visionthink/scripts/eval.sh Qwen/Qwen2.5-VL-7B-Instruct vllm_generate video_all 32 0 0 0 0 logs_eval len_fix0.35
 
-bash visionthink/scripts/eval.sh Qwen/Qwen2.5-VL-7B-Instruct vllm_generate video_all 128 0 0 0 0 logs_eval len_fix0.35
+# bash visionthink/scripts/eval.sh Qwen/Qwen2.5-VL-7B-Instruct vllm_generate video_all 128 0 0 0 0 logs_eval len_fix0.35
 
-bash visionthink/scripts/eval.sh Qwen/Qwen2.5-VL-7B-Instruct vllm_generate video_all 128 0 0 0 0 logs_eval len_fix0.25
+# bash visionthink/scripts/eval.sh Qwen/Qwen2.5-VL-7B-Instruct vllm_generate video_all 128 0 0 0 0 logs_eval len_fix0.25
 
-bash visionthink/scripts/eval.sh Qwen/Qwen2.5-VL-7B-Instruct vllm_generate video_all 64 0 0 0 0 logs_eval len_fix0.35
+# bash visionthink/scripts/eval.sh Qwen/Qwen2.5-VL-7B-Instruct vllm_generate video_all 64 0 0 0 0 logs_eval len_fix0.35
 
-bash visionthink/scripts/eval.sh Qwen/Qwen2.5-VL-7B-Instruct vllm_generate video_all 64 0 0 0 0 logs_eval len_fix0.25
+# bash visionthink/scripts/eval.sh Qwen/Qwen2.5-VL-7B-Instruct vllm_generate video_all 64 0 0 0 0 logs_eval len_fix0.25
 
-bash visionthink/scripts/eval.sh Qwen/Qwen2.5-VL-7B-Instruct vllm_generate video_all 32 0 0 0 0 logs_eval len_fix0.25
+# bash visionthink/scripts/eval.sh Qwen/Qwen2.5-VL-7B-Instruct vllm_generate video_all 32 0 0 0 0 logs_eval len_fix0.25
 
-bash visionthink/scripts/eval.sh Qwen/Qwen2.5-VL-7B-Instruct vllm_generate video_all 128 0 0 0 0 logs_eval len_fix0.5
+# bash visionthink/scripts/eval.sh Qwen/Qwen2.5-VL-7B-Instruct vllm_generate video_all 128 0 0 0 0 logs_eval len_fix0.5
 
-bash visionthink/scripts/eval.sh Qwen/Qwen2.5-VL-7B-Instruct vllm_generate video_all 64 0 0 0 0 logs_eval len_fix0.5
+# bash visionthink/scripts/eval.sh Qwen/Qwen2.5-VL-7B-Instruct vllm_generate video_all 64 0 0 0 0 logs_eval len_fix0.5
 
-bash visionthink/scripts/eval.sh Qwen/Qwen2.5-VL-7B-Instruct vllm_generate video_all 32 0 0 0 0 logs_eval len_fix0.5
+# bash visionthink/scripts/eval.sh Qwen/Qwen2.5-VL-7B-Instruct vllm_generate video_all 32 0 0 0 0 logs_eval len_fix0.5
 
 
 bash visionthink/scripts/eval.sh Qwen/Qwen3-VL-8B-Instruct vllm_generate video_all 32 0 0 0 0 logs_eval len_fix0.35

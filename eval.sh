@@ -55,17 +55,23 @@ process_experiment() {
     if [[ "$max_num_frames" == "1" ]]; then
         frames_list=(128 32 64)
         # frames_list=(32)
+    elif [[ "$max_num_frames" == "2" ]]; then
+        frames_list=(32 64)
     else
         frames_list=("$max_num_frames")
     fi
 
-    if [[ "$TYPE" == "all" ]]; then
-        types_to_run=("video_all")
+    if [[ "$METHOD" == "all" ]]; then
+        types_to_run=("video", "video_add", "images")
+    elif [[ "$TYPE" == *"video_all"* ]]; then
+        types_to_run=("video", "video_add")
     else
         types_to_run=("$TYPE")
     fi
 
-    if [[ "$METHOD" == "all" ]]; then
+    # if [[ "$METHOD" == "all" ]]; then
+    #     methods_to_run=("" "base_mrope_qwen3vl_8B")
+    if [[ "$METHOD" == *"all"* ]]; then
         methods_to_run=("0" "base_mrope")
     else
         methods_to_run=("$METHOD")

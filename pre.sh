@@ -42,6 +42,9 @@ for pat in \
   "multiprocessing" \
   "spawn" \
   "mix.sh" \
+  "z.sh" \
+  "x0.sh" \
+  "x.sh" \
   "prepa"
 do
   kill_pat TERM "$pat"

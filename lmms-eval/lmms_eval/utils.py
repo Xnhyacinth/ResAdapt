@@ -571,7 +571,11 @@ def make_table(result_dict, column: str = "results", sort_results: bool = False)
     ]
 
     # Optional columns (index 9+) are hidden if all values are N/A
-    optional_col_indices = list(range(9, len(all_headers)))
+    optional_col_indices = [
+        i
+        for i in range(9, len(all_headers))
+        if all_headers[i] not in ("Visual_Len_Mean", "Visual_Len_Min", "Visual_Len_Max")
+    ]
 
     # Helper to format stderr value
     def fmt_se(se_val):
@@ -624,6 +628,8 @@ def make_table(result_dict, column: str = "results", sort_results: bool = False)
             if m.endswith("_internal_variance") or m.endswith("_consistency_rate"):
                 continue
             if m in ("scale_mean", "scale_min", "scale_max", "scale_std"):
+                continue
+            if m in ("visual_input_len_mean", "visual_input_len_min", "visual_input_len_max"):
                 continue
             if m in ("generation_s_mean", "generation_s_min", "generation_s_max"):
                 continue
