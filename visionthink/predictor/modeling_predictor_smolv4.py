@@ -7,7 +7,7 @@ from transformers import AutoProcessor, AutoModelForImageTextToText, PreTrainedM
 from concurrent.futures import ThreadPoolExecutor
 
 from visionthink.predictor.configuration_predictor_smol import SmolPredictorConfig
-from visionthink.predictor.AZNet_smolv3 import RegressionHeadPredictorSmol
+from visionthink.predictor.AZNet_smolv4 import RegressionHeadPredictorSmol
 
 
 class SmolPredictorForConditionalGeneration(PreTrainedModel):
@@ -656,7 +656,10 @@ if __name__ == "__main__":
         sim_temp=0.15,
         sim_gamma=0.05,
     )
-    model = SmolPredictorForConditionalGeneration(config).to("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # model = SmolPredictorForConditionalGeneration(config).to(device)
+    logistic_normal_config = SmolPredictorConfig(**{**config.to_dict(), "continuous_dist": "logistic_normal"})
+    model = SmolPredictorForConditionalGeneration(logistic_normal_config).to(device)
     # "/mnt/bn/jiangzhongtao/users/liaohuanxuan/models/predictorv2_sft",
     # model = SmolPredictorForConditionalGeneration.from_pretrained(
     #     "/mnt/bn/jiangzhongtao/users/liaohuanxuan/models/predictor_smol_init",
@@ -690,7 +693,7 @@ if __name__ == "__main__":
         }
     ]
 
-    # save_path = "/mnt/bn/jiangzhongtao/users/liaohuanxuan/models/predictor_smolv1"
+    # save_path = "/mnt/bn/jiangzhongtao/users/liaohuanxuan/models/predictor_smolv4"
     # model.save_pretrained(save_path, safe_serialization=True)
     out = model.scale_multi_modal(messages=messages, return_mm_data=False, eval_mode=True)
     out_text = model.scale_multi_modal(messages=messages_text, return_mm_data=False, eval_mode=True)

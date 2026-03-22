@@ -1677,6 +1677,8 @@ def process_video_list(
     List[Tuple[torch.Tensor, Dict[str, Any]]],
     List[List[Tuple[torch.Tensor, Dict[str, Any]]]],
     int,
+    Optional[torch.Tensor],
+    Optional[torch.Tensor],
 ]:
     """
     Process all videos in a single sample (including temporal chunking).
@@ -1685,10 +1687,285 @@ def process_video_list(
         flat_chunks: flattened list of all chunks
         structured_chunks: chunks grouped by original video
         consumed_count: number of scale values consumed
+        selected_chunk_scales: updated 1D scale tensor when a chunk-keep mode is active
+        selected_chunk_scale_mask: updated 1D mask tensor aligned with selected_chunk_scales
     """
+    keep_topk_chunks = kwargs.get("keep_topk_chunks", None)
+    keep_chunk_threshold = kwargs.get("keep_chunk_threshold", None)
+    resize_kept_chunks = bool(kwargs.get("resize_kept_chunks", True))
+
+    topk_enabled = isinstance(keep_topk_chunks, int) and keep_topk_chunks > 0
+    threshold_enabled = isinstance(keep_chunk_threshold, (int, float))
+    if topk_enabled and threshold_enabled:
+        raise ValueError("keep_topk_chunks and keep_chunk_threshold are mutually exclusive")
+
+    selection_mode = "topk" if topk_enabled else "threshold" if threshold_enabled else None
+
+    def _prepare_video(video_item: Any) -> Tuple[Any, List[Dict[str, Any]]]:
+        if isinstance(video_item, tuple):
+            video_frames_local, video_metadata_local = video_item
+            video_metadata_local = split_video_metadata(video_metadata_local, temporal_patch_size)
+            if not kwargs.get("video2list", False):
+                for j in range(len(video_metadata_local)):
+                    video_metadata_local[j]["video_timestamps"] = j * temporal_patch_size
+            return video_frames_local, video_metadata_local
+
+        video_frames_local = video_item
+        if not kwargs.get("video2list", False):
+            video_metadata_local = [
+                {"video_timestamps": j}
+                for j in range(0, video_frames_local.shape[0], temporal_patch_size)
+            ]
+        else:
+            video_metadata_local = [{} for _ in range(math.ceil(video_frames_local.shape[0] / temporal_patch_size))]
+        return video_frames_local, video_metadata_local
+
+    def _infer_global_scale_mode() -> Optional[str]:
+        if scale_mask_row is not None:
+            remaining_scales = int(scale_mask_row[start_obj_idx:].detach().bool().sum().item())
+        else:
+            remaining_scales = max(int(scales_row.numel() - start_obj_idx), 0)
+        total_frames = 0
+        total_chunks = 0
+        for video_item in videos:
+            frames = video_item[0] if isinstance(video_item, tuple) else video_item
+            num_frames_local = int(frames.shape[0])
+            total_frames += num_frames_local
+            if num_frames_local > 0:
+                total_chunks += math.ceil(num_frames_local / temporal_patch_size)
+        if total_frames > 0 and remaining_scales == total_frames:
+            return "per_frame"
+        if total_chunks > 0 and remaining_scales == total_chunks:
+            return "per_chunk"
+        return None
+
+    def _chunk_compare_scale(
+        *,
+        video_idx_local: int,
+        chunk_idx_local: int,
+        chunk_scale_offset_local: int,
+        start_local: int,
+        end_local: int,
+        num_frames_local: int,
+        forced_mode: Optional[str],
+    ) -> Tuple[float, bool]:
+        if scale_mask_row is not None:
+            remaining_scales = int(
+                scale_mask_row[start_obj_idx + chunk_scale_offset_local :].detach().bool().sum().item()
+            )
+        else:
+            remaining_scales = int(scales_row.numel() - (start_obj_idx + chunk_scale_offset_local))
+        if forced_mode == "per_frame":
+            use_per_frame_scales_local = True
+        elif forced_mode == "per_chunk":
+            use_per_frame_scales_local = False
+        else:
+            use_per_frame_scales_local = remaining_scales == num_frames_local
+
+        if use_per_frame_scales_local:
+            scale_start = start_obj_idx + chunk_scale_offset_local + start_local
+            scale_end = start_obj_idx + chunk_scale_offset_local + end_local
+            assert_valid_scale_index(
+                scales_row, scale_end - 1, context=f"video[{video_idx_local}] chunk[{chunk_idx_local}]"
+            )
+            scale_slice = scales_row[scale_start:scale_end]
+            if scale_mask_row is not None:
+                mask_slice = scale_mask_row[scale_start:scale_end].to(scale_slice.dtype)
+                denom = mask_slice.sum().clamp_min(1.0)
+                scale_factor = (scale_slice * mask_slice).sum() / denom
+            else:
+                scale_factor = scale_slice.mean()
+            return float(scale_factor.item()), True
+
+        scale_idx = start_obj_idx + chunk_scale_offset_local + chunk_idx_local
+        assert_valid_scale_index(scales_row, scale_idx, context=f"video[{video_idx_local}] chunk[{chunk_idx_local}]")
+        check_scale_mask(scale_mask_row, scale_idx, context=f"video[{video_idx_local}] chunk[{chunk_idx_local}]")
+        return float(scales_row[scale_idx].item()), False
+
+    def _resize_chunk(chunk_frames_local: Any, scale_factor_local: float) -> Any:
+        if not resize_kept_chunks:
+            return chunk_frames_local.cpu() if hasattr(chunk_frames_local, "cpu") else chunk_frames_local
+        height_local, width_local = get_image_size(chunk_frames_local[0], channel_dim=ChannelDimension.FIRST)
+        resized_h_local, resized_w_local = get_target_resolution(
+            height_local,
+            width_local,
+            scale_factor_local,
+            patch_size,
+            image_factor,
+            max_token_num,
+        )
+        processed_frames_local = video_processor.resize(
+            image=chunk_frames_local,
+            size=SizeDict(height=resized_h_local, width=resized_w_local),
+            interpolation=InterpolationMode.BICUBIC,
+        )
+        return processed_frames_local.cpu() if hasattr(processed_frames_local, "cpu") else processed_frames_local
+
+    if selection_mode is not None:
+        flat_chunks: List[Tuple[torch.Tensor, Dict[str, Any]]] = []
+        structured_chunks: List[List[Tuple[torch.Tensor, Dict[str, Any]]]] = []
+        descriptors: List[Dict[str, Any]] = []
+        chunk_scale_offset = 0
+        scale_mode = _infer_global_scale_mode()
+        video_infos: List[Dict[str, Any]] = []
+
+        for video_idx, video in enumerate(videos):
+            video_frames, video_metadata = _prepare_video(video)
+            num_frames = int(video_frames.shape[0])
+            if num_frames == 0:
+                structured_chunks.append([])
+                video_infos.append({"empty": True})
+                continue
+
+            num_chunks = math.ceil(num_frames / temporal_patch_size)
+            uses_per_frame_for_video = False
+            scale_base_start = chunk_scale_offset
+
+            for chunk_idx in range(num_chunks):
+                start = chunk_idx * temporal_patch_size
+                end = min(num_frames, start + temporal_patch_size)
+                chunk_frames = video_frames[start:end]
+                compare_scale, use_per_frame_scales = _chunk_compare_scale(
+                    video_idx_local=video_idx,
+                    chunk_idx_local=chunk_idx,
+                    chunk_scale_offset_local=chunk_scale_offset,
+                    start_local=start,
+                    end_local=end,
+                    num_frames_local=num_frames,
+                    forced_mode=scale_mode,
+                )
+                uses_per_frame_for_video = use_per_frame_scales
+
+                if chunk_idx >= len(video_metadata):
+                    raise IndexError(
+                        f"[adaptive_scaling] video_metadata too short: "
+                        f"len={len(video_metadata)}, chunk_idx={chunk_idx}, video_idx={video_idx}"
+                    )
+
+                descriptors.append(
+                    {
+                        "global_order": len(descriptors),
+                        "video_idx": video_idx,
+                        "chunk_idx": chunk_idx,
+                        "chunk_frames": chunk_frames,
+                        "metadata": dict(video_metadata[chunk_idx]),
+                        "compare_scale": compare_scale,
+                    }
+                )
+
+            chunk_scale_offset += num_frames if uses_per_frame_for_video else num_chunks
+            video_infos.append(
+                {
+                    "empty": False,
+                    "scale_base_start": scale_base_start,
+                    "num_frames": num_frames,
+                    "num_chunks": num_chunks,
+                    "per_frame": uses_per_frame_for_video,
+                }
+            )
+
+        if not descriptors:
+            return flat_chunks, structured_chunks, chunk_scale_offset, None, None
+
+        descriptors_by_video: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+        for desc in descriptors:
+            descriptors_by_video[desc["video_idx"]].append(desc)
+
+        selected_orders: set[int]
+        if selection_mode == "threshold":
+            selected_orders = {desc["global_order"] for desc in descriptors if desc["compare_scale"] >= float(keep_chunk_threshold)}
+        else:
+            ranked = sorted(descriptors, key=lambda d: (-d["compare_scale"], d["global_order"]))
+            selected_orders = {desc["global_order"] for desc in ranked[: int(keep_topk_chunks)]}
+
+        for group in descriptors_by_video.values():
+            if any(desc["global_order"] in selected_orders for desc in group):
+                continue
+            best_desc = max(group, key=lambda d: (d["compare_scale"], -d["global_order"]))
+            selected_orders.add(best_desc["global_order"])
+
+        selected_descriptors = [desc for desc in descriptors if desc["global_order"] in selected_orders]
+
+        for video_idx in range(len(videos)):
+            current_group = [desc for desc in selected_descriptors if desc["video_idx"] == video_idx]
+            if not current_group:
+                if video_idx < len(structured_chunks):
+                    continue
+                structured_chunks.append([])
+                continue
+
+            rebuilt_group: List[Tuple[torch.Tensor, Dict[str, Any]]] = []
+            for kept_idx, desc in enumerate(current_group):
+                chunk_meta = dict(desc["metadata"])
+                chunk_meta["video_timestamps"] = kept_idx * temporal_patch_size
+                processed_frames = _resize_chunk(desc["chunk_frames"], desc["compare_scale"])
+                rebuilt_group.append((processed_frames, chunk_meta))
+                flat_chunks.append((processed_frames, chunk_meta))
+            structured_chunks.append(rebuilt_group)
+
+        # Align scales with the original predictor layout (per-frame or per-chunk slots).
+        # - ``scale_mask_row`` is NOT rewritten in chunk-selection mode: copy the slice for this video
+        #   into ``mask_full`` unchanged.
+        # - ``full`` starts as the same slice of ``scales_row``, then: (1) force 0 where mask is False
+        #   (padding) for fair comparison; (2) set 0 only on **dropped** chunk indices (selection).
+        # - If ``resize_kept_chunks`` is False, selected indices are rewritten to 1.0 because the kept
+        #   frames/chunks are passed through at original resolution, so the effective applied scale is 1.
+        desc_by_key = {(d["video_idx"], d["chunk_idx"]): d for d in descriptors}
+        full_segments: List[torch.Tensor] = []
+        mask_segments: List[torch.Tensor] = []
+
+        for video_idx, info in enumerate(video_infos):
+            if info.get("empty"):
+                full_segments.append(torch.tensor([], dtype=torch.float32))
+                mask_segments.append(torch.tensor([], dtype=torch.bool))
+                continue
+
+            scale_base = int(info["scale_base_start"])
+            n_frames = int(info["num_frames"])
+            n_chunks = int(info["num_chunks"])
+            per_frame = bool(info["per_frame"])
+            slot_len = n_frames if per_frame else n_chunks
+            ss0 = start_obj_idx + scale_base
+            ee0 = ss0 + slot_len
+            assert_valid_scale_index(scales_row, ee0 - 1, context=f"aligned_scales v{video_idx} segment")
+            full = scales_row[ss0:ee0].detach().to(torch.float32).clone()
+            if scale_mask_row is not None:
+                mask_full = scale_mask_row[ss0:ee0].detach().bool().clone()
+                full = torch.where(mask_full, full, torch.zeros_like(full))
+            else:
+                mask_full = torch.ones(slot_len, dtype=torch.bool, device=full.device)
+
+            for chunk_idx in range(n_chunks):
+                start = chunk_idx * temporal_patch_size
+                end = min(n_frames, start + temporal_patch_size)
+                desc = desc_by_key[(video_idx, chunk_idx)]
+                if desc["global_order"] in selected_orders:
+                    if not resize_kept_chunks:
+                        if per_frame:
+                            full[start:end] = torch.where(
+                                mask_full[start:end],
+                                torch.ones_like(full[start:end]),
+                                torch.zeros_like(full[start:end]),
+                            )
+                        else:
+                            full[chunk_idx] = 1.0 if bool(mask_full[chunk_idx].item()) else 0.0
+                    continue
+                if per_frame:
+                    full[start:end] = 0.0
+                else:
+                    full[chunk_idx] = 0.0
+
+            full_segments.append(full)
+            mask_segments.append(mask_full)
+
+        selected_scales_tensor = torch.cat(full_segments)
+        selected_mask_tensor = torch.cat(mask_segments)
+        return flat_chunks, structured_chunks, chunk_scale_offset, selected_scales_tensor, selected_mask_tensor
+
     flat_chunks = []
     structured_chunks = []
     chunk_scale_offset = 0
+    global_scale_mode = _infer_global_scale_mode()
 
     for video_idx, video in enumerate(videos):
         # Parse frames and metadata
@@ -1716,7 +1993,12 @@ def process_video_list(
 
         num_chunks = math.ceil(num_frames / temporal_patch_size)
         remaining_scales = int(scales_row.numel() - (start_obj_idx + chunk_scale_offset))
-        use_per_frame_scales = remaining_scales == num_frames
+        if global_scale_mode == "per_frame":
+            use_per_frame_scales = True
+        elif global_scale_mode == "per_chunk":
+            use_per_frame_scales = False
+        else:
+            use_per_frame_scales = remaining_scales == num_frames
         current_video_chunks = []
 
         for chunk_idx in range(num_chunks):
@@ -1769,7 +2051,7 @@ def process_video_list(
         structured_chunks.append(current_video_chunks)
         chunk_scale_offset += num_frames if use_per_frame_scales else num_chunks
 
-    return flat_chunks, structured_chunks, chunk_scale_offset
+    return flat_chunks, structured_chunks, chunk_scale_offset, None, None
 
 
 def to_cpu_tensor(x: Any, *, dtype: Optional[torch.dtype] = None) -> Optional[torch.Tensor]:
@@ -1839,6 +2121,9 @@ def apply_adaptive_scaling(
         mask_row = mask_cpu[i] if mask_cpu is not None else None
 
         obj_idx = 0
+        updated_scale_segments: List[torch.Tensor] = []
+        updated_mask_segments: Optional[List[torch.Tensor]] = [] if mask_row is not None else None
+        selection_applied = False
 
         # -------- Images --------
         images = None
@@ -1868,6 +2153,10 @@ def apply_adaptive_scaling(
                 scaled_imgs = images
                 consumed = len(images)
             new_mm_data[image_key] = scaled_imgs
+            if consumed > 0:
+                updated_scale_segments.append(scales_row[obj_idx : obj_idx + consumed].clone())
+                if updated_mask_segments is not None and mask_row is not None:
+                    updated_mask_segments.append(mask_row[obj_idx : obj_idx + consumed].clone())
             obj_idx += consumed
 
         # -------- Videos --------
@@ -1882,7 +2171,7 @@ def apply_adaptive_scaling(
             video_key = "video"
 
         if videos is not None:
-            flat_chunks, _, consumed = process_video_list(
+            flat_chunks, _, consumed, selected_video_scales, selected_video_scale_mask = process_video_list(
                 videos,
                 scales_row,
                 obj_idx,
@@ -1897,8 +2186,29 @@ def apply_adaptive_scaling(
 
             # new_mm_data[f"{video_key}_s"] = struct_chunks
             new_mm_data[f"{video_key}"] = flat_chunks
+            if selected_video_scales is not None:
+                selection_applied = True
+                updated_scale_segments.append(selected_video_scales.clone())
+                if updated_mask_segments is not None:
+                    if selected_video_scale_mask is not None:
+                        updated_mask_segments.append(selected_video_scale_mask.clone())
+                    else:
+                        updated_mask_segments.append(torch.ones_like(selected_video_scales, dtype=torch.bool))
+            elif consumed > 0:
+                updated_scale_segments.append(scales_row[obj_idx : obj_idx + consumed].clone())
+                if updated_mask_segments is not None and mask_row is not None:
+                    updated_mask_segments.append(mask_row[obj_idx : obj_idx + consumed].clone())
 
             obj_idx += consumed
+
+        if selection_applied and updated_scale_segments:
+            rebuilt_scales = torch.cat(updated_scale_segments).unsqueeze(0)
+            new_mm_data["_adaptive_selected_scales"] = rebuilt_scales
+            if updated_mask_segments is not None:
+                rebuilt_mask = torch.cat(updated_mask_segments).unsqueeze(0)
+                new_mm_data["_adaptive_selected_scale_mask"] = rebuilt_mask
+            else:
+                new_mm_data["_adaptive_selected_scale_mask"] = torch.ones_like(rebuilt_scales, dtype=torch.bool)
 
         output.append(new_mm_data)
 

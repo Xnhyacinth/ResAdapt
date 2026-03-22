@@ -1,0 +1,9 @@
+include: _default_template_yaml_boxed
+task: mvbench_action_count_boxed
+dataset_name: action_count
+test_split: train
+lmms_eval_specific_kwargs:
+  default:
+    sub_task: action_count
+    post_prompt: "Only give the best option letter. Put your final answer in \\boxed{}.\n"
+

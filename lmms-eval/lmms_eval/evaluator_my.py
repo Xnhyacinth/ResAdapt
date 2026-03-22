@@ -751,6 +751,7 @@ def evaluate(
 
     # Save rescaled visuals locally before gather on multi-rank
     if log_samples and WORLD_SIZE > 1 and evaluation_tracker is not None:
+        plot_rescaled = str(os.getenv("PLOT_RESCALED", "0")).lower() in ("1", "true", "yes", "y", "t")
         if datetime_str and not getattr(evaluation_tracker, "date_id", None):
             evaluation_tracker.date_id = datetime_str.replace(":", "-")
         from pathlib import Path
@@ -766,6 +767,8 @@ def evaluate(
                     if isinstance(has_predictor_scale, (list, tuple)):
                         has_predictor_scale = any(bool(v) for v in has_predictor_scale)
                     if rescaled_mm_data is None or not has_predictor_scale:
+                        continue
+                    if not plot_rescaled:
                         continue
                     doc_id = sample.get("doc_id", "unknown")
                     question = None

@@ -1,0 +1,9 @@
+include: _default_template_yaml_boxed
+task: mvbench_unexpected_action_boxed
+dataset_name: unexpected_action
+test_split: train
+lmms_eval_specific_kwargs:
+  default:
+    sub_task: unexpected_action
+    post_prompt: "Only give the best option letter. Put your final answer in \\boxed{}.\n"
+

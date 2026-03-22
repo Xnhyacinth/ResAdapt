@@ -120,7 +120,7 @@ AVAILABLE_CHAT_TEMPLATE_MODELS = {
     "longvila": "LongVila",
     "llava_onevision1_5": "Llava_OneVision1_5",
     "vllm_generate_custom": "VLLMGenerateCustom",
-    "vllm_generate_autothink": "VLLMGenerateAutothink",
+    "vllm_generate_autothink": "VLLMGenerateAutoThink",
     "qwen2_5_vl_custom": "Qwen2_5_VL_Custom",
     "qwen3_vl_custom": "Qwen3_VL_Custom",
 }

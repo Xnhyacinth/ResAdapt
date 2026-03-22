@@ -1,0 +1,9 @@
+include: _default_template_yaml_boxed
+task: mvbench_action_sequence_boxed
+dataset_name: action_sequence
+test_split: train
+lmms_eval_specific_kwargs:
+  default:
+    sub_task: action_sequence
+    post_prompt: "Only give the best option letter. Put your final answer in \\boxed{}.\n"
+

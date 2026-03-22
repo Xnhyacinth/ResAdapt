@@ -31,6 +31,8 @@ def _gpu_worker_main(
     microbatch_ms: int,
     microbatch_max: int,
     max_frames: Optional[int] = None,
+    max_scale_override: Optional[float] = None,
+    min_scale_override: Optional[float] = None,
     send_ready: bool = True,
 ):
     """
@@ -71,6 +73,16 @@ def _gpu_worker_main(
                     config.max_frames = max_frames_val
             except Exception:
                 pass
+        if max_scale_override is not None:
+            try:
+                config.max_scale = float(max_scale_override)
+            except Exception:
+                pass
+        if min_scale_override is not None:
+            try:
+                config.min_scale = float(min_scale_override)
+            except Exception:
+                pass
         predictor = AutoModel.from_pretrained(
             model_path, config=config, dtype="auto", device_map="auto", trust_remote_code=True
         )
@@ -81,6 +93,16 @@ def _gpu_worker_main(
 
     max_scale = float(getattr(predictor.config, "max_scale", 2.0))
     min_scale = float(getattr(predictor.config, "min_scale", 0.25))
+    if max_scale_override is not None:
+        try:
+            max_scale = float(max_scale_override)
+        except Exception:
+            pass
+    if min_scale_override is not None:
+        try:
+            min_scale = float(min_scale_override)
+        except Exception:
+            pass
     use_discrete_action = bool(getattr(predictor.config, "use_discrete_action", False))
     discrete_step = float(getattr(predictor.config, "discrete_step", 0.25))
 
@@ -283,6 +305,8 @@ class MultiGPUInferPool:
         microbatch_ms: int = 10,
         microbatch_max: int = 32,
         max_frames: Optional[int] = None,
+        max_scale: Optional[float] = None,
+        min_scale: Optional[float] = None,
         schedule_policy: str = "least_inflight",
         submit_threads: int = 128,
         start_stagger_s: float = 0.0,
@@ -292,6 +316,8 @@ class MultiGPUInferPool:
         self.model_path = model_path
         self.num_gpus = int(num_gpus)
         self.max_frames = max_frames
+        self.max_scale = max_scale
+        self.min_scale = min_scale
         self.max_queue_per_gpu = int(max_queue_per_gpu)
         self.timeout = float(timeout)
         self.schedule_policy = str(schedule_policy or "least_inflight")
@@ -330,6 +356,8 @@ class MultiGPUInferPool:
                     microbatch_ms=self.microbatch_ms,
                     microbatch_max=self.microbatch_max,
                     max_frames=self.max_frames,
+                    max_scale_override=self.max_scale,
+                    min_scale_override=self.min_scale,
                     send_ready=send_ready,
                 ),
                 daemon=True,

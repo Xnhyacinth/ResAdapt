@@ -36,6 +36,9 @@ from lmms_eval.utils import (
     sanitize_task_name,
 )
 
+def _env_true(name: str, default: str = "0") -> bool:
+    return str(os.getenv(name, default)).lower() in ("1", "true", "yes", "y", "t")
+
 @contextlib.contextmanager
 def _tokenizers_parallelism_disabled():
     prev = os.getenv("TOKENIZERS_PARALLELISM", None)
@@ -755,6 +758,8 @@ class EvaluationTracker:
                 sample_entries = self._collect_sample_scales(samples)
                 len_entries = self._collect_sample_visual_lens(samples)
                 has_len = bool(len_entries)
+                plot_rescaled = _env_true("PLOT_RESCALED", "0")
+                plot_scales = _env_true("PLOT_SCALES", "0")
 
                 vis_workers = int(os.getenv("LMMS_EVAL_VIS_WORKERS", "4"))
                 rescaled_tasks = []
@@ -773,17 +778,18 @@ class EvaluationTracker:
                             question = sample.get("input", "")
                         scales_for_vis = sample.get("scales", None)
                         answer = sample.get("target", "")
-                        rescaled_tasks.append(
-                            (
-                                _prepare_mm_for_ipc(rescaled_mm_data),
-                                question,
-                                answer,
-                                scales_for_vis,
-                                task_name,
-                                doc_id,
-                                path,
+                        if plot_rescaled:
+                            rescaled_tasks.append(
+                                (
+                                    _prepare_mm_for_ipc(rescaled_mm_data),
+                                    question,
+                                    answer,
+                                    scales_for_vis,
+                                    task_name,
+                                    doc_id,
+                                    path,
+                                )
                             )
-                        )
                         sample.pop("rescaled_mm_data", None)
                     scales = sample.get("scales", None)
                     generation_s = sample.get("generation_s", None)
@@ -872,7 +878,7 @@ class EvaluationTracker:
                     with open(file_results_samples, "a", encoding="utf-8") as f:
                         f.write(sample_dump)
 
-                if rescaled_tasks and vis_workers > 0:
+                if plot_rescaled and rescaled_tasks and vis_workers > 0:
                     with _tokenizers_parallelism_disabled():
                         with ProcessPoolExecutor(max_workers=min(vis_workers, len(rescaled_tasks))) as executor:
                             futures = [
@@ -896,7 +902,7 @@ class EvaluationTracker:
                                     pass
 
                 has_scales = bool(sample_entries)
-                if has_scales:
+                if plot_scales and has_scales:
                     figs_dir = path.joinpath("figs")
                     figs_dir.mkdir(parents=True, exist_ok=True)
                     task_dir = figs_dir.joinpath(task_name)

@@ -1,10 +1,23 @@
 export HF_HUB_OFFLINE=True
+pip install httpx==0.23.3
 export PYTHONPATH=/mnt/bn/jiangzhongtao/users/liaohuanxuan/visionthink:$PYTHONPATH
 export OPENAI_API_URL="https://gpt-i18n.byteintl.net/gpt/openapi/online/v2/crawl/openai/deployments/gpt_openapi"
 export OPENAI_API_KEY="dxMlgIJpXgkdou8z77OKt5rg4BQjwgJZ_GPT_AK"
 export MODEL_VERSION="gpt-5-2025-08-07"
 
 # export PYTORCH_ALLOC_CONF="max_split_size_mb:64,garbage_collection_threshold:0.8"
+#
+# Predictor temporal chunk retention (vllm_generate_custom; mutually exclusive threshold vs top-k):
+#   Env (optional, not cleared by unset at top — same pattern as PREDICTOR_MAX_SCALE):
+#     export PREDICTOR_KEEP_CHUNK_THRESHOLD=0.5   # keep chunks whose mean scale >= threshold
+#     export PREDICTOR_KEEP_TOPK_CHUNKS=3         # keep top-k chunks by mean scale (overrides threshold if both set)
+#     export PREDICTOR_RESIZE_KEPT_CHUNKS=0       # 0/false: no resize-to-original after selection
+#   method (arg 10) or predictor_chunk (arg 12) substrings:
+#     chunk_th0.5       -> threshold 0.5
+#     chunk_topk3       -> top-k 3
+#     chunk_noresize    -> resize kept chunks off
+#   Example: ./eval.sh ... method0 chunk_th0.5_chunk_noresize
+#            ./eval.sh ... method0 0 0 0 0 0 0 0 logs 0 0 0 chunk_topk2
 
 unset PREDICTOR_PATH ENABLE_BASELINE_SCALE BASELINE_SCALE_FACTOR USE_DEBUG MICRO_BATCH WORKERS max_inflight_per_gpu
 unset CONVERT2IMAGES REMOVEPAD VLLM_MROPE_PATCH VIDEO2LIST VIDEO2IMAGE ADD_SYS
@@ -22,6 +35,8 @@ idx=${8:-"0"}
 log=${9:-"logs_eval"}
 method=${10:-"0"}
 debug=${11:-"0"}
+# Optional: extra tokens for predictor chunk selection (chunk_th*, chunk_topk*, chunk_noresize); merged with method for parsing
+predictor_chunk_spec=${12:-""}
 
 image_min_tokens=128
 image_max_tokens=16384
@@ -73,18 +88,23 @@ if [[ "$task_type" == *"video_inc"* ]]; then
     tasks="videomme_inc,longvideobench_val_v_inc"
 elif [[ "$task_type" == *"video"* ]]; then
     tasks="videomme,longvideobench_val_v,video_mmmu,lvbench,mmvu_val"
+    tasks="longvideobench_val_v,video_mmmu,lvbench,mmvu_val,mlvu_dev"
     # tasks="mmvu_val"
     if [[ "$task_type" == *"all"* ]]; then
         # tasks="videomme,longvideobench_val_v,mlvu_dev,mlvu_test,egoschema_subset,lvbench,video_mmmu,mmvu_val,activitynettvg,charades,nextgqa" #mvbench
-        tasks="videomme,longvideobench_val_v,video_mmmu,lvbench,mmvu_val,mlvu_dev,activitynettvg,charades,nextgqa,youcook2_val" #mvbench
+        # tasks="videomme,longvideobench_val_v,video_mmmu,lvbench,mmvu_val,mlvu_dev,activitynettvg,charades,nextgqa,youcook2_val" #mvbench
+        tasks="videomme,longvideobench_val_v,video_mmmu,lvbench,mmvu_val,mlvu_dev,activitynettvg,charades,nextgqa,mvbench"
+    elif [[ "$task_type" == *"max"* ]]; then
+        tasks="longvideobench_val_v,video_mmmu,mmvu_val,lvbench,mlvu_dev" #mvbench youcook2_val
     elif [[ "$task_type" == *"add"* ]]; then
         # tasks="mlvu_dev,mlvu_test,egoschema_subset,activitynettvg,charades,nextgqa" #mvbench
-        tasks="mlvu_dev,activitynettvg,charades,nextgqa,youcook2_val" #mvbench
+        tasks="mlvu_dev,activitynettvg,charades,nextgqa,mvbench" #mvbench youcook2_val
     fi
 else
     # tasks="mmmu_val,chartqa,docvqa_val,ai2d,gqa,realworldqa,textvqa_val,mathvista_testmini,mathvision_testmini,ocrbench"
-    tasks="mmmu_val,chartqa,mathvista_testmini,mathvision_testmini,ocrbench,textvqa_val,ai2d"
-    # tasks="mmmu_val,chartqa,mmbench_en_dev,pope,mme" # mmvet mathverse_testmini
+    tasks="mmmu_val,chartqa,mathvista_testmini,ocrbench,textvqa_val,ai2d"
+    # tasks="mmmu_val,chartqa,mmbench_en_dev,pope,mme" # mmvet mathverse_testmini mathvision_testmini
+    video_max_pixels=${image_max_pixels}
 fi
 
 if [[ "$method" == *"sys"* ]]; then
@@ -97,7 +117,7 @@ if [[ "$method" == *"sys"* ]]; then
 fi
 
 if [[ "$task_type" == *"video"* ]]; then
-    model_args="${model_args},max_frames=${max_num_frames}"
+    # model_args="${model_args},max_frames=${max_num_frames}"
     extra_name="${extra_name}_frames${max_num_frames}"
 fi
 
@@ -125,6 +145,7 @@ if [ "$debug" == "debug" ]; then
 
     TENSOR_PARALLEL_SIZE=1  
     DATA_PARALLEL_SIZE=1    
+    tasks="mlvu_dev"
 fi
 
 if [ "$conv_template" == "vicuna_v1" ]; then
@@ -164,7 +185,7 @@ elif [[ "$conv_template" == *"vllm"* ]]; then
         echo "Using predictor path: $PREDICTOR_PATH"
     fi
 
-    if [[ "$model" == *"sc"* ]] && [[ "$method" == *"base"* ]]; then
+    if [[ "$method" == *"base"* ]]; then
         if [[ "$method" == *"qwen3vl"* ]]; then
             num=$(echo "$method" | grep -oP '(?<=-)\d+(?=B-)')
             if [ -n "$num" ]; then
@@ -173,6 +194,11 @@ elif [[ "$conv_template" == *"vllm"* ]]; then
                 num=8
             fi
             model="Qwen/Qwen3-VL-${num}B-Instruct"
+        elif [[ "$method" == *"auto"* ]]; then
+            model="IVUL-KAUST/VideoAuto-R1-Qwen2.5-VL-7B"
+            model_type="vllm_generate_autothink"
+        elif [[ "$method" == *"videor1"* ]]; then
+            model="/mnt/bn/jiangzhongtao/users/liaohuanxuan/models/videor1_7B"
         else
             num=$(echo "$model" | grep -oP '(?<=-)\d+(?=B-)')
             if [ -n "$num" ]; then
@@ -196,16 +222,63 @@ elif [[ "$conv_template" == *"vllm"* ]]; then
         export BASELINE_SCALE_FACTOR=${num}
     fi
 
-    if [[ "$model" == *"Video-R1-7B"* ]]; then
-        model=/mnt/bn/jiangzhongtao/users/liaohuanxuan/models/videor1_7B
-    fi
-
     model_args="model=${model},tensor_parallel_size=${TENSOR_PARALLEL_SIZE},data_parallel_size=${DATA_PARALLEL_SIZE},gpu_memory_utilization=${GPU_MEMORY_UTILIZATION}"
     
+    min_scale=$(echo "$method" | grep -oP 'min\K[0-9]+(\.[0-9]+)?' | head -n 1)
+    max_scale=$(echo "$method" | grep -oP 'max\K[0-9]+(\.[0-9]+)?' | head -n 1)
+    if [ -n "$max_scale" ]; then
+        model_args="${model_args},predictor_max_scale=${max_scale}"
+    elif [ -n "$PREDICTOR_MAX_SCALE" ]; then
+        model_args="${model_args},predictor_max_scale=${PREDICTOR_MAX_SCALE}"
+    fi
+    if [ -n "$min_scale" ]; then
+        model_args="${model_args},predictor_min_scale=${min_scale}"
+    elif [ -n "$PREDICTOR_MIN_SCALE" ]; then
+        model_args="${model_args},predictor_min_scale=${PREDICTOR_MIN_SCALE}"
+    fi
+
+    # Predictor chunk retention: parse method + optional arg12; export env + model_args (top-k wins over threshold if both)
+    _chunk_src="${method}"
+    if [ -n "${predictor_chunk_spec}" ] && [ "${predictor_chunk_spec}" != "0" ]; then
+        _chunk_src="${method}_${predictor_chunk_spec}"
+        extra_name="${extra_name}_pchunk${predictor_chunk_spec}"
+    fi
+    if [[ "${_chunk_src}" == *"chunk_noresize"* ]]; then
+        export PREDICTOR_RESIZE_KEPT_CHUNKS=0
+    fi
+    _chunk_th=$(echo "${_chunk_src}" | grep -oP 'chunk_th\K[0-9]+\.?[0-9]*' | head -n1)
+    _chunk_topk=$(echo "${_chunk_src}" | grep -oP 'chunk_topk\K[0-9]+' | head -n1)
+    if [ -n "${_chunk_topk}" ] && [ -n "${_chunk_th}" ]; then
+        echo "Warning: both chunk_topk and chunk_th in method/spec; using chunk_topk=${_chunk_topk}"
+        _chunk_th=""
+    fi
+    if [ -n "${_chunk_topk}" ]; then
+        export PREDICTOR_KEEP_TOPK_CHUNKS=${_chunk_topk}
+        extra_name="${extra_name}_ctopk${_chunk_topk}"
+    elif [ -n "${_chunk_th}" ]; then
+        export PREDICTOR_KEEP_CHUNK_THRESHOLD=${_chunk_th}
+        extra_name="${extra_name}_cth${_chunk_th}"
+    fi
+    if [ -n "${PREDICTOR_KEEP_TOPK_CHUNKS:-}" ]; then
+        unset PREDICTOR_KEEP_CHUNK_THRESHOLD
+        model_args="${model_args},predictor_keep_topk_chunks=${PREDICTOR_KEEP_TOPK_CHUNKS}"
+    elif [ -n "${PREDICTOR_KEEP_CHUNK_THRESHOLD:-}" ]; then
+        unset PREDICTOR_KEEP_TOPK_CHUNKS
+        model_args="${model_args},predictor_keep_chunk_threshold=${PREDICTOR_KEEP_CHUNK_THRESHOLD}"
+    fi
+    if [ -n "${PREDICTOR_RESIZE_KEPT_CHUNKS:-}" ]; then
+        model_args="${model_args},predictor_resize_kept_chunks=${PREDICTOR_RESIZE_KEPT_CHUNKS}"
+    fi
+
     if [[ "$method" == *"len"* ]]; then
         echo "Using visual length"
         export LOG_VISUAL_LEN=True
         model_args="${model_args},log_visual_len=true"
+    fi
+
+    if [[ "$method" == *"plt"* ]]; then
+        export PLOT_RESCALED=True
+        export PLOT_SCALES=True
     fi
 
     if [ ! -n "$step" ]; then
@@ -237,9 +310,9 @@ elif [[ "$conv_template" == *"vllm"* ]]; then
             export max_inflight_per_gpu=8
             export MICRO_BATCH=8
             export MAX_QUEUE_PER_GPU=8
-            export WORKERS=8
+            export WORKERS=2
             export SCALE_PREPROCESS_RETRIES=8
-            BATCH_SIZE=4
+            BATCH_SIZE=1
         elif [ "$max_num_frames" -ge 64 ]; then
             # frames=64 
             export max_inflight_per_gpu=16
@@ -272,6 +345,14 @@ elif [[ "$conv_template" == *"vllm"* ]]; then
 else
     echo "Unsupported conv_template: $conv_template"
     # exit 1
+fi
+
+if [[ "$task_type" == *"video"* && "$conv_template" != *"vllm"* ]]; then
+    if [[ "$model_type" == "qwen2_5_vl_autothink" ]]; then
+        model_args="${model_args},max_frames=${max_num_frames}"
+    else
+        model_args="${model_args},max_num_frames=${max_num_frames}"
+    fi
 fi
 
 # if [[ "$model" == *"rope"* ]]; then
@@ -355,7 +436,7 @@ fi
 # fi
 
 if [[ "$model_type" == *"qwen2_5_vl"* ]]; then
-    model_args="${model_args},interleave_visuals=False" # ,max_pixels=${video_max_pixels} ,max_pixels=12845056
+    model_args="${model_args},interleave_visuals=False,max_pixels=${video_max_pixels}" # ,max_pixels=${video_max_pixels} ,max_pixels=12845056
 elif [[ "$model_type" == *"qwen2_vl"* ]]; then
     model_args="${model_args},max_pixels=${video_max_pixels}" # ,max_pixels=2359296
 elif [[ "$model_type" == *"qwen3_vl"* ]]; then
@@ -400,6 +481,11 @@ if [[ "$sa_pattern" == *"flashvid"* && "$conv_template" != *"vllm"* ]]; then
     model_args="${model_args},enable_flashvid=True,retention_ratio=${retention_ratio},do_segment=${DO_SEGMENT},min_segment_num=${MIN_SEGMENT_NUM},complementary_segment=${COMPLEMENTARY_SEGMENT},token_selection_method=${TOKEN_SELECTION_METHOD},alpha=${ALPHA},temporal_threshold=${TEMPORAL_THRESHOLD},expansion=${EXPANSION},pruning_layer=${PRUNING_LAYER},llm_retention_ratio=${LLM_RETENTION_RATIO}"
 
 elif [[ "$sa_pattern" == *"quadtree"* ]]; then
+    threshold=0.78
+    sa_tree_temporal_thresh=0.6
+    sa_var_thresh=0.28
+    sa_tem_diff_thresh=23
+    sttm_slow_ver=False
     if [ "$sa_ratio" == "0.05" ]; then
         threshold=0.65
         sa_tree_temporal_thresh=0.49
@@ -421,6 +507,11 @@ elif [[ "$sa_pattern" == *"quadtree"* ]]; then
         sa_tem_diff_thresh=30
     elif [ "$sa_ratio" == "0.2" ]; then
         threshold=0.7
+        sa_tree_temporal_thresh=0.6
+        sa_var_thresh=0.3
+        sa_tem_diff_thresh=25
+    elif [ "$sa_ratio" == "0.25" ]; then
+        threshold=0.75
         sa_tree_temporal_thresh=0.6
         sa_var_thresh=0.3
         sa_tem_diff_thresh=25
@@ -642,12 +733,30 @@ if [ -d "${output_path}/submissions" ]; then
     exit 0
 fi
 
+if [ -d "${output_path}" ]; then
+    found_results=0
+    for d in "${output_path}"/*; do
+        if [ -d "$d" ]; then
+            if ls "$d"/*results.json >/dev/null 2>&1; then
+                found_results=1
+                break
+            fi
+        fi
+    done
+    if [ "$found_results" -eq 1 ]; then
+        echo "Skip: found *results.json under subfolders of ${output_path}"
+        exit 0
+    fi
+fi
+
 if [ ! -d "${output_path}" ]; then
     mkdir -p "${output_path}"
 fi
 
 echo "model: ${model}"
 echo "model_type: ${model_type}"
+echo "predictor_chunk_spec (arg12): ${predictor_chunk_spec:-}"
+echo "PREDICTOR_KEEP_CHUNK_THRESHOLD=${PREDICTOR_KEEP_CHUNK_THRESHOLD:-} PREDICTOR_KEEP_TOPK_CHUNKS=${PREDICTOR_KEEP_TOPK_CHUNKS:-} PREDICTOR_RESIZE_KEPT_CHUNKS=${PREDICTOR_RESIZE_KEPT_CHUNKS:-}"
 echo "extra_kwargs: ${extra_kwargs}"
 echo "log_file: ${log_file}"
 echo "output_path: ${output_path}"

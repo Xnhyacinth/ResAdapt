@@ -189,7 +189,7 @@ class PatchWiseTemporalAttention(nn.Module):
 
         sdpa_mask = None
         if exists(attn_mask):
-            sdpa_mask = repeat(attn_mask, "b t -> (b l) 1 1 t", l=L)
+            sdpa_mask = repeat(attn_mask.to(torch.bool), "b t -> (b l) 1 1 t", l=L)
             sdpa_mask = _sdpa_mask_from_valid(sdpa_mask, dtype=q.dtype)
 
         out = F.scaled_dot_product_attention(
@@ -288,7 +288,7 @@ class SpatialAttention(nn.Module):
 
         sdpa_mask = None
         if exists(attn_mask):
-            sdpa_mask = rearrange(attn_mask, "b t l -> (b t) 1 1 l")
+            sdpa_mask = rearrange(attn_mask.to(torch.bool), "b t l -> (b t) 1 1 l")
             sdpa_mask = _sdpa_mask_from_valid(sdpa_mask, dtype=q.dtype)
 
         out = F.scaled_dot_product_attention(
@@ -336,7 +336,7 @@ class CrossAttention(nn.Module):
 
         sdpa_mask = None
         if exists(context_mask):
-            sdpa_mask = rearrange(context_mask, "b m -> b 1 1 m")
+            sdpa_mask = rearrange(context_mask.to(torch.bool), "b m -> b 1 1 m")
             sdpa_mask = _sdpa_mask_from_valid(sdpa_mask, dtype=q.dtype)
 
         out = F.scaled_dot_product_attention(
@@ -394,49 +394,26 @@ class PredictorDecoderLayer(ModuleUtilsMixin, nn.Module):
         heads = config.num_heads
         dropout = config.dropout
         ff_mult = config.ff_mult
-        
-        self.has_cross_attn = layer_idx < config.cross_attn_depth
-        self.has_spatio_temporal = layer_idx >= config.cross_attn_depth and layer_idx < (config.cross_attn_depth + config.depth)
-
-        if self.has_cross_attn:
-            self.cross_attn = CrossAttention(dim=dim, dim_head=dim_head, heads=heads, dropout=dropout)
-            self.ff_cross = FeedForward(dim, mult=ff_mult, dropout=dropout)
-            self.cross_attn_gate = nn.Parameter(torch.zeros(1))
-            self.use_cross_attn_gate = bool(getattr(config, "use_cross_attn_gate", False))
-
-        if self.has_spatio_temporal:
-            self.temporal_attn = PatchWiseTemporalAttention(dim=dim, dim_head=dim_head, heads=heads, dropout=dropout)
-            self.spatial_attn = SpatialAttention(dim=dim, dim_head=dim_head, heads=heads, dropout=dropout)
-            self.ff_spatio_temporal = FeedForward(dim, mult=ff_mult, dropout=dropout)
+        self.spatial_attn = SpatialAttention(dim=dim, dim_head=dim_head, heads=heads, dropout=dropout)
+        self.temporal_attn = PatchWiseTemporalAttention(dim=dim, dim_head=dim_head, heads=heads, dropout=dropout)
+        self.cross_attn = CrossAttention(dim=dim, dim_head=dim_head, heads=heads, dropout=dropout)
+        self.ffn = FeedForward(dim, mult=ff_mult, dropout=dropout)
 
     def forward(self, hidden_states, encoder_hidden_states=None, encoder_attention_mask=None,
                 temporal_rope=None, spatial_rope=None,
                 temporal_mask=None, spatial_mask=None):
         # hidden_states: (B, T, L, D)
-        
-        if self.has_cross_attn and encoder_hidden_states is not None:
-            residual = hidden_states
-            # Cross Attn internally handles reshape
-            use_gate = bool(getattr(self, "use_cross_attn_gate", False))
-            gate = torch.tanh(self.cross_attn_gate) if use_gate else 1.0
-            out = self.cross_attn(hidden_states, encoder_hidden_states, context_mask=encoder_attention_mask)
-            hidden_states = residual + gate * out
-            residual = hidden_states
-            hidden_states = residual + gate * self.ff_cross(hidden_states)
-
-        if self.has_spatio_temporal:
-            # Temporal
-            hidden_states = hidden_states + self.temporal_attn(
-                hidden_states, rotary_pos_emb=temporal_rope, attn_mask=temporal_mask
+        hidden_states = hidden_states + self.spatial_attn(
+            hidden_states, rotary_pos_emb=spatial_rope, attn_mask=spatial_mask
+        )
+        hidden_states = hidden_states + self.temporal_attn(
+            hidden_states, rotary_pos_emb=temporal_rope, attn_mask=temporal_mask
+        )
+        if encoder_hidden_states is not None:
+            hidden_states = hidden_states + self.cross_attn(
+                hidden_states, encoder_hidden_states, context_mask=encoder_attention_mask
             )
-            
-            # Spatial
-            hidden_states = hidden_states + self.spatial_attn(
-                hidden_states, rotary_pos_emb=spatial_rope, attn_mask=spatial_mask
-            )
-            
-            # Feed Forward
-            hidden_states = hidden_states + self.ff_spatio_temporal(hidden_states)
+        hidden_states = hidden_states + self.ffn(hidden_states)
 
         return hidden_states
 
@@ -538,32 +515,42 @@ class FrameWiseScalePredictor(ModuleUtilsMixin, nn.Module):
     """
     def __init__(
         self, *, dim, depth, dim_head=64, heads=8, dropout=0., ff_mult=4,
-        cross_attn_depth=1, max_frames=4, use_discrete_action=False,
+        max_frames=4, use_discrete_action=False,
         scale_bins=None, min_scale=0.25, max_scale=3.0, spatial_merge_size=2,
         gate_temperature=0.5, gate_query_scale=1.0, regression_head_mode="mlp",
         beta_param_scale=1.0, beta_add_one=True, beta_init_mode="uniform",
         continuous_dist="beta", continuous_eval_quantile=0.5, logistic_normal_init_sigma=0.7,
+        categorical_temperature=1.0,
         pool_gate_mode="no_ln", info_fuse_mode="pooled_ln",
         sim_scale_weight=0.0, sim_tau=0.0, sim_temp=1.0, sim_gamma=0.0,
     ):
         super().__init__()
         self.spatial_merge_size = spatial_merge_size
         self.max_frames = max_frames
-        self.use_discrete_action = use_discrete_action
+        dist_name = str(continuous_dist)
+        if dist_name in {"norm", "normal", "logistic-norm", "logisticnormal"}:
+            dist_name = "logistic_normal"
+        if dist_name in {"cat"}:
+            dist_name = "categorical"
+        self.continuous_dist = dist_name
+        self.use_discrete_action = bool(use_discrete_action) or (self.continuous_dist == "categorical")
         self.gate_temperature = float(gate_temperature)
         self.gate_query_scale = float(gate_query_scale)
         self.beta_param_scale = float(beta_param_scale)
         self.beta_add_one = bool(beta_add_one)
         self.beta_init_mode = str(beta_init_mode)
-        self.continuous_dist = str(continuous_dist)
         self.continuous_eval_quantile = float(continuous_eval_quantile)
         self.logistic_normal_init_sigma = float(logistic_normal_init_sigma)
+        self.categorical_temperature = float(categorical_temperature)
         self.pool_gate_mode = str(pool_gate_mode)
         self.info_fuse_mode = str(info_fuse_mode)
         self.sim_scale_weight = float(sim_scale_weight)
         self.sim_tau = float(sim_tau)
         self.sim_temp = float(sim_temp)
         self.sim_gamma = float(sim_gamma)
+
+        if self.continuous_dist not in {"beta", "logistic_normal", "categorical"}:
+            raise ValueError(f"Unsupported continuous_dist: {self.continuous_dist}")
         
         if self.use_discrete_action:
             if scale_bins is None:
@@ -582,12 +569,12 @@ class FrameWiseScalePredictor(ModuleUtilsMixin, nn.Module):
 
         self.config = PredictorConfig(
             hidden_size=dim, dim_head=dim_head, num_heads=heads, dropout=dropout,
-            ff_mult=ff_mult, cross_attn_depth=cross_attn_depth, depth=depth
+            ff_mult=ff_mult,
+            depth=depth,
         )
         
-        total_layers = cross_attn_depth + depth
         self.layers = nn.ModuleList([
-            PredictorDecoderLayer(self.config, i) for i in range(total_layers)
+            PredictorDecoderLayer(self.config, i) for i in range(depth)
         ])
         
         if self.pool_gate_mode == "patch_ln":
@@ -731,7 +718,10 @@ class FrameWiseScalePredictor(ModuleUtilsMixin, nn.Module):
         Input: logits (B, T, num_bins)
         Output: indices (B, T), scales (B, T), log_probs (B, T)
         """
-        dist = Categorical(logits=logits.float())
+        temp = float(getattr(self, "categorical_temperature", 1.0))
+        if not (temp > 0):
+            temp = 1.0
+        dist = Categorical(logits=(logits / temp).float())
         
         if actions is None:
             # Sample Index
@@ -1090,6 +1080,7 @@ class FrameWiseScalePredictor(ModuleUtilsMixin, nn.Module):
                 self._last_concentration_loss = (concentration * m).sum() / m.sum().clamp_min(1.0)
             else:
                 sigma = F.softplus(params[..., 1]) + 1e-6
+                sigma = sigma.clamp(min=0.1, max=5.0)
                 self._last_concentration_loss = ((1.0 / (sigma + 1e-6)) * m).sum() / m.sum().clamp_min(1.0)
         else:
             self._last_concentration_loss = None
@@ -1213,20 +1204,20 @@ class FrameWiseScalePredictor(ModuleUtilsMixin, nn.Module):
                 print(f"[predictor] non-finite scales in samples: {bad_samples}")
                 scales = scales.masked_fill(invalid_scales, 1.0)
 
-        # if eval_mode:
-        #     mask = scale_mask_out.float()
-        #     denom = mask.sum(dim=1, keepdim=True).clamp_min(1.0)
-        #     mean = (scales * mask).sum(dim=1, keepdim=True) / denom
-        #     var = ((scales - mean) ** 2 * mask).sum(dim=1, keepdim=True) / denom
-        #     scale_var_mean = var.mean().item()
-        #     gate_entropy_mean = gate_entropy_sum / max(1, gate_entropy_count)
-        #     feat_norm_var_mean = feat_norm_var_sum / max(1, feat_norm_var_count)
-        #     frame_sim_mean = frame_sim_sum / max(1, frame_sim_count)
-        #     print(
-        #         f"[predictor-debug] gate_entropy_mean={gate_entropy_mean:.6f} "
-        #         f"feat_norm_var_mean={feat_norm_var_mean:.6f} frame_sim_mean={frame_sim_mean:.6f} "
-        #         f"scale_var_mean={scale_var_mean:.6f}"
-        #     )
+        if eval_mode:
+            mask = scale_mask_out.float()
+            denom = mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+            mean = (scales * mask).sum(dim=1, keepdim=True) / denom
+            var = ((scales - mean) ** 2 * mask).sum(dim=1, keepdim=True) / denom
+            scale_var_mean = var.mean().item()
+            gate_entropy_mean = gate_entropy_sum / max(1, gate_entropy_count)
+            feat_norm_var_mean = feat_norm_var_sum / max(1, feat_norm_var_count)
+            frame_sim_mean = frame_sim_sum / max(1, frame_sim_count)
+            print(
+                f"[predictor-debug] gate_entropy_mean={gate_entropy_mean:.6f} "
+                f"feat_norm_var_mean={feat_norm_var_mean:.6f} frame_sim_mean={frame_sim_mean:.6f} "
+                f"scale_var_mean={scale_var_mean:.6f}"
+            )
 
         return raw_actions, scales, log_probs, scale_mask_out
 
@@ -1485,50 +1476,50 @@ class RegressionHeadPredictor(ModuleUtilsMixin, nn.Module):
         # Running one big Linear layer is much faster than loop
         visual_batch_proj = self.vlp(visual_batch)
 
-        # if eval_mode:
-        #     object_t_dims = visual_grid_thw[:, 0].to(torch.long)
-        #     object_l_dims = ((visual_grid_thw[:, 1] * visual_grid_thw[:, 2]) // (self.spatial_merge_size ** 2)).to(torch.long)
-        #     pre_sim_sum = 0.0
-        #     pre_sim_count = 0
-        #     pre_var_sum = 0.0
-        #     pre_var_count = 0
-        #     post_sim_sum = 0.0
-        #     post_sim_count = 0
-        #     post_var_sum = 0.0
-        #     post_var_count = 0
-        #     for i in range(int(object_t_dims.shape[0])):
-        #         t = int(object_t_dims[i].item())
-        #         l = int(object_l_dims[i].item())
-        #         if t <= 0 or l <= 0:
-        #             continue
-        #         pre = visual_batch[i, : t * l].reshape(t, l, -1)
-        #         pre_mean = pre.mean(dim=1)
-        #         if t > 1:
-        #             pre_sim = F.cosine_similarity(pre_mean[:-1], pre_mean[1:], dim=-1)
-        #             pre_sim_sum += pre_sim.mean().item()
-        #             pre_sim_count += 1
-        #         pre_norm = pre_mean.float().norm(dim=-1)
-        #         pre_var_sum += pre_norm.var(unbiased=False).item()
-        #         pre_var_count += 1
+        if eval_mode:
+            object_t_dims = visual_grid_thw[:, 0].to(torch.long)
+            object_l_dims = ((visual_grid_thw[:, 1] * visual_grid_thw[:, 2]) // (self.spatial_merge_size ** 2)).to(torch.long)
+            pre_sim_sum = 0.0
+            pre_sim_count = 0
+            pre_var_sum = 0.0
+            pre_var_count = 0
+            post_sim_sum = 0.0
+            post_sim_count = 0
+            post_var_sum = 0.0
+            post_var_count = 0
+            for i in range(int(object_t_dims.shape[0])):
+                t = int(object_t_dims[i].item())
+                l = int(object_l_dims[i].item())
+                if t <= 0 or l <= 0:
+                    continue
+                pre = visual_batch[i, : t * l].reshape(t, l, -1)
+                pre_mean = pre.mean(dim=1)
+                if t > 1:
+                    pre_sim = F.cosine_similarity(pre_mean[:-1], pre_mean[1:], dim=-1)
+                    pre_sim_sum += pre_sim.mean().item()
+                    pre_sim_count += 1
+                pre_norm = pre_mean.float().norm(dim=-1)
+                pre_var_sum += pre_norm.var(unbiased=False).item()
+                pre_var_count += 1
 
-        #         post = visual_batch_proj[i, : t * l].reshape(t, l, -1)
-        #         post_mean = post.mean(dim=1)
-        #         if t > 1:
-        #             post_sim = F.cosine_similarity(post_mean[:-1], post_mean[1:], dim=-1)
-        #             post_sim_sum += post_sim.mean().item()
-        #             post_sim_count += 1
-        #         post_norm = post_mean.float().norm(dim=-1)
-        #         post_var_sum += post_norm.var(unbiased=False).item()
-        #         post_var_count += 1
+                post = visual_batch_proj[i, : t * l].reshape(t, l, -1)
+                post_mean = post.mean(dim=1)
+                if t > 1:
+                    post_sim = F.cosine_similarity(post_mean[:-1], post_mean[1:], dim=-1)
+                    post_sim_sum += post_sim.mean().item()
+                    post_sim_count += 1
+                post_norm = post_mean.float().norm(dim=-1)
+                post_var_sum += post_norm.var(unbiased=False).item()
+                post_var_count += 1
 
-        #     pre_sim_mean = pre_sim_sum / max(1, pre_sim_count)
-        #     post_sim_mean = post_sim_sum / max(1, post_sim_count)
-        #     pre_var_mean = pre_var_sum / max(1, pre_var_count)
-        #     post_var_mean = post_var_sum / max(1, post_var_count)
-        #     print(
-        #         f"[predictor-debug] vlp_pre_sim_mean={pre_sim_mean:.6f} vlp_pre_var_mean={pre_var_mean:.6f} "
-        #         f"vlp_post_sim_mean={post_sim_mean:.6f} vlp_post_var_mean={post_var_mean:.6f}"
-        #     )
+            pre_sim_mean = pre_sim_sum / max(1, pre_sim_count)
+            post_sim_mean = post_sim_sum / max(1, post_sim_count)
+            pre_var_mean = pre_var_sum / max(1, pre_var_count)
+            post_var_mean = post_var_sum / max(1, post_var_count)
+            print(
+                f"[predictor-debug] vlp_pre_sim_mean={pre_sim_mean:.6f} vlp_pre_var_mean={pre_var_mean:.6f} "
+                f"vlp_post_sim_mean={post_sim_mean:.6f} vlp_post_var_mean={post_var_mean:.6f}"
+            )
 
         return self.scorer(
             visual_features_batch=visual_batch_proj,

@@ -385,6 +385,8 @@ if [[ "$scale_multi_modal_data" == *"scale"* ]]; then
             PREDICTOR_PATH=/mnt/bn/jiangzhongtao/users/liaohuanxuan/models/predictor_head
         elif [[ "$scale_multi_modal_data" == *"embed"* ]]; then
             PREDICTOR_PATH=/mnt/bn/jiangzhongtao/users/liaohuanxuan/models/predictor_embed
+        elif [[ "$scale_multi_modal_data" == *"v4"* ]]; then
+            PREDICTOR_PATH=/mnt/bn/jiangzhongtao/users/liaohuanxuan/models/predictor_smolv4
         elif [[ "$scale_multi_modal_data" == *"v2"* ]]; then
             PREDICTOR_PATH=/mnt/bn/jiangzhongtao/users/liaohuanxuan/models/predictor_smolv2_zero
         elif [[ "$scale_multi_modal_data" == *"v1"* ]]; then

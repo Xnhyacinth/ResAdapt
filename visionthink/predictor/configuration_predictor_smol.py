@@ -68,6 +68,7 @@ class SmolPredictorConfig(PretrainedConfig):
         continuous_eval_quantile: float = 0.5,
         beta_param_scale: float = 1.0,
         logistic_normal_init_sigma: float = 0.7,
+        categorical_temperature: float = 1.0,
         pool_gate_mode: str = "no_ln",
         info_fuse_mode: str = "pooled_ln",
         contrastive_weight: float = 0.1,
@@ -147,6 +148,7 @@ class SmolPredictorConfig(PretrainedConfig):
         self.continuous_eval_quantile = continuous_eval_quantile
         self.beta_param_scale = beta_param_scale
         self.logistic_normal_init_sigma = logistic_normal_init_sigma
+        self.categorical_temperature = categorical_temperature
         self.pool_gate_mode = pool_gate_mode
         self.info_fuse_mode = info_fuse_mode
         self.contrastive_weight = contrastive_weight

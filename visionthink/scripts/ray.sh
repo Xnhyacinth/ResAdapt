@@ -27,7 +27,7 @@ ray start --head --port=8888 --node-ip-address=$(hostname -I | awk '{print $1}')
 
 # ray start --address=22.0.185.67:8888
 
-# ray start --address=22.1.38.67:8888
+# ray start --address=22.0.56.73:8888
 
 # ray start --address=22.0.253.74:8888
 

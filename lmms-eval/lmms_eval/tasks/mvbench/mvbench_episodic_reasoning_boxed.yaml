@@ -1,0 +1,9 @@
+include: _default_template_yaml_boxed
+task: mvbench_episodic_reasoning_boxed
+dataset_name: episodic_reasoning
+test_split: train
+lmms_eval_specific_kwargs:
+  default:
+    sub_task: episodic_reasoning
+    post_prompt: "Only give the best option letter. Put your final answer in \\boxed{}.\n"
+

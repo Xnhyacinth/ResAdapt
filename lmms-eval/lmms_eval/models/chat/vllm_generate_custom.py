@@ -22,6 +22,45 @@ process_vision_info, _ = optional_import("qwen_vl_utils", "process_vision_info")
 def env_true(name: str, default: str = "0") -> bool:
     return str(os.getenv(name, default)).lower() in ("1", "true", "yes", "y", "t")
 
+
+def _parse_optional_float(value: Any, env_name: str) -> Optional[float]:
+    if value is None:
+        value = os.getenv(env_name, "")
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _parse_optional_int(value: Any, env_name: str) -> Optional[int]:
+    if value is None:
+        value = os.getenv(env_name, "")
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+    try:
+        parsed = int(value)
+    except Exception:
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _parse_optional_bool(value: Any, env_name: str, default: bool) -> bool:
+    if value is None:
+        value = os.getenv(env_name, "1" if default else "0")
+    if isinstance(value, str):
+        return value.lower() in ("1", "true", "yes", "y", "t")
+    return bool(value)
+
 def default_scale_entry() -> Dict[str, Any]:
     """Return a fresh default entry each time to avoid shared-mutation bugs."""
     return {"scale_means": 1.0, "scale_mask": None, "scales": None}
@@ -142,6 +181,70 @@ def _masked_scale_stats(scales: Any, scale_mask: Any) -> Optional[Tuple[float, f
     return float(sum(values) / len(values)), float(min(values)), float(max(values))
 
 
+def _compute_effective_scale_mean(scales: Any, scale_mask: Any, fallback: float = 1.0) -> float:
+    """Fair mean comparable to the predictor: use ``scale_mask`` (unchanged in chunk-selection).
+
+    Where ``scale_mask`` is False, treat scale as 0. Mean is ``sum(s * m) / sum(m)`` over the
+    aligned vector (same rule as masking padding to 0 before averaging). Chunk selection does not
+    rewrite the mask; it updates ``scales`` only:
+    - dropped indices -> 0
+    - selected indices -> keep predictor scale when resized, or 1.0 when ``noresize``
+    """
+    if scales is None:
+        return float(fallback)
+    try:
+        import torch
+
+        if torch.is_tensor(scales):
+            s = scales.detach().float().reshape(-1)
+            if s.numel() == 0:
+                return float(fallback)
+            if torch.is_tensor(scale_mask):
+                m = scale_mask.detach().float().reshape(-1)
+                if m.numel() != s.numel():
+                    return float(s.mean().item())
+                denom = float(m.sum().item())
+                if denom <= 0.0:
+                    return float(fallback)
+                return float((s * m).sum().item() / denom)
+            return float(s.mean().item())
+        if hasattr(scales, "float") and hasattr(scales, "mean"):
+            s2 = scales.float().reshape(-1)
+            if torch.is_tensor(scale_mask):
+                m2 = scale_mask.detach().float().reshape(-1)
+                if m2.numel() == s2.numel():
+                    denom = float(m2.sum().item())
+                    if denom <= 0.0:
+                        return float(fallback)
+                    return float((s2 * m2).sum().item() / denom)
+            return float(s2.mean().item())
+        if isinstance(scales, (list, tuple)):
+            flat_vals: List[float] = []
+            for row in scales:
+                if isinstance(row, (list, tuple)):
+                    flat_vals.extend([float(v) for v in row if isinstance(v, (int, float))])
+                elif isinstance(row, (int, float)):
+                    flat_vals.append(float(row))
+            if not flat_vals:
+                return float(fallback)
+            if isinstance(scale_mask, (list, tuple)) and len(scale_mask) == len(scales):
+                flat_m: List[float] = []
+                for mrow in scale_mask:
+                    if isinstance(mrow, (list, tuple)):
+                        flat_m.extend([1.0 if bool(x) else 0.0 for x in mrow])
+                    else:
+                        flat_m.append(1.0 if bool(mrow) else 0.0)
+                if len(flat_m) == len(flat_vals):
+                    denom = sum(flat_m)
+                    if denom <= 0.0:
+                        return float(fallback)
+                    return float(sum(v * m for v, m in zip(flat_vals, flat_m)) / denom)
+            return float(sum(flat_vals) / len(flat_vals))
+    except Exception:
+        pass
+    return float(fallback)
+
+
 WORKERS = int(os.getenv("WORKERS", "32"))
 MICRO_BATCH = int(os.getenv("MICRO_BATCH", "16"))
 max_inflight_per_gpu = int(os.getenv("max_inflight_per_gpu", "4"))
@@ -194,6 +297,11 @@ class VLLMGenerateCustom(VLLMChat):
         fps: Optional[int] = None,
         nframes: Optional[int] = 32,
         log_visual_len: Optional[bool] = None,
+        predictor_max_scale: Optional[float] = None,
+        predictor_min_scale: Optional[float] = None,
+        predictor_keep_chunk_threshold: Optional[float] = None,
+        predictor_keep_topk_chunks: Optional[int] = None,
+        predictor_resize_kept_chunks: Optional[bool] = None,
         **kwargs,
     ):
         self.predictor_path = os.getenv("PREDICTOR_PATH", None)
@@ -210,6 +318,19 @@ class VLLMGenerateCustom(VLLMChat):
             self.baseline_scale_factor = float(os.getenv("BASELINE_SCALE_FACTOR", "1.0"))
         except Exception:
             self.baseline_scale_factor = 1.0
+        self.predictor_keep_chunk_threshold = _parse_optional_float(
+            predictor_keep_chunk_threshold, "PREDICTOR_KEEP_CHUNK_THRESHOLD"
+        )
+        self.predictor_keep_topk_chunks = _parse_optional_int(
+            predictor_keep_topk_chunks, "PREDICTOR_KEEP_TOPK_CHUNKS"
+        )
+        self.predictor_resize_kept_chunks = _parse_optional_bool(
+            predictor_resize_kept_chunks, "PREDICTOR_RESIZE_KEPT_CHUNKS", default=True
+        )
+        if self.predictor_keep_chunk_threshold is not None and self.predictor_keep_topk_chunks is not None:
+            raise ValueError(
+                "predictor_keep_chunk_threshold and predictor_keep_topk_chunks are mutually exclusive"
+            )
         self.add_sys = env_true("ADD_SYS")
         self.scale_preprocess_retries = int(os.getenv("SCALE_PREPROCESS_RETRIES", "2"))
         self.scale_preprocess_timeout_s = int(os.getenv("SCALE_PREPROCESS_TIMEOUT_S", "21600"))
@@ -237,6 +358,20 @@ class VLLMGenerateCustom(VLLMChat):
             max_frames=max_frame_num // 2 if self.predictor_path is not None and "smol" not in self.predictor_path else max_frame_num,
             schedule_policy=os.getenv("PREDICTOR_SCHED_POLICY", "least_inflight"),
         )
+        if predictor_max_scale is None:
+            try:
+                predictor_max_scale = float(os.getenv("PREDICTOR_MAX_SCALE", ""))
+            except Exception:
+                predictor_max_scale = None
+        if predictor_min_scale is None:
+            try:
+                predictor_min_scale = float(os.getenv("PREDICTOR_MIN_SCALE", ""))
+            except Exception:
+                predictor_min_scale = None
+        if isinstance(predictor_max_scale, (int, float)):
+            self._pool_kwargs["max_scale"] = float(predictor_max_scale)
+        if isinstance(predictor_min_scale, (int, float)):
+            self._pool_kwargs["min_scale"] = float(predictor_min_scale)
         self.pool = None
         self.scale_preprocess_failures: List[Tuple[str, str]] = []
         self._predictor_scales_cache_base: Optional[str] = None
@@ -311,9 +446,31 @@ class VLLMGenerateCustom(VLLMChat):
         name = name.replace("..", "_")
         return name
 
+    def _format_scale_for_cache(self, v: Any) -> Optional[str]:
+        if v is None:
+            return None
+        try:
+            fv = float(v)
+        except Exception:
+            return None
+        if not (fv > 0):
+            return None
+        s = f"{fv:.6f}".rstrip("0").rstrip(".")
+        return s if s else None
+
+    def _predictor_scales_cache_file_tag(self) -> str:
+        min_s = self._format_scale_for_cache(self._pool_kwargs.get("min_scale", None))
+        max_s = self._format_scale_for_cache(self._pool_kwargs.get("max_scale", None))
+        tag = ""
+        if min_s is not None:
+            tag += f"_min{min_s}"
+        if max_s is not None:
+            tag += f"_max{max_s}"
+        return tag
+
     def _predictor_scales_cache_key(self, benchmark: str) -> str:
         bench = self._sanitize_benchmark_name(benchmark)
-        return f"{bench}::frames{self._predictor_scales_cache_frames}"
+        return f"{bench}::frames{self._predictor_scales_cache_frames}{self._predictor_scales_cache_file_tag()}"
 
     def _scale_entry_jsonable(self, entry: Dict[str, Any]) -> Dict[str, Any]:
         def _to_jsonable(obj: Any) -> Any:
@@ -382,7 +539,12 @@ class VLLMGenerateCustom(VLLMChat):
         try:
             bench = self._sanitize_benchmark_name(benchmark)
             bench_dir = os.path.join(self._predictor_scales_cache_base, bench)
-            cache_file = os.path.join(bench_dir, f"scales_{self._predictor_scales_cache_frames}.jsonl")
+            cache_file = os.path.join(
+                bench_dir,
+                f"scales_{self._predictor_scales_cache_frames}{self._predictor_scales_cache_file_tag()}.jsonl",
+            )
+            if not os.path.exists(cache_file):
+                print(f"[VLLMGenerateCustom] No predictor scales cache for task={benchmark} frames={self._predictor_scales_cache_frames}: {cache_file}")
             if os.path.exists(cache_file):
                 with open(cache_file, "r", encoding="utf-8") as f:
                     for line in f:
@@ -414,7 +576,10 @@ class VLLMGenerateCustom(VLLMChat):
         bench = self._sanitize_benchmark_name(benchmark)
         bench_dir = os.path.join(self._predictor_scales_cache_base, bench)
         os.makedirs(bench_dir, exist_ok=True)
-        cache_file = os.path.join(bench_dir, f"scales_{self._predictor_scales_cache_frames}.jsonl")
+        cache_file = os.path.join(
+            bench_dir,
+            f"scales_{self._predictor_scales_cache_frames}{self._predictor_scales_cache_file_tag()}.jsonl",
+        )
         cache_mem = self._load_predictor_scales_cache(bench)
         try:
             with open(cache_file, "a", encoding="utf-8") as f:
@@ -672,14 +837,19 @@ class VLLMGenerateCustom(VLLMChat):
             else:
                 stats["scale_mask_ratio"] = None
         except Exception:
-            if isinstance(scales, (list, tuple)):
-                stats["scales_len"] = len(scales)
-                if len(scales) > 0:
-                    try:
-                        stats["scales_min"] = float(min(scales))
-                        stats["scales_max"] = float(max(scales))
-                    except Exception:
-                        pass
+            stats["scale_mask_ratio"] = None
+
+        norm_scales = self._normalize_scales(scales)
+        if norm_scales:
+            stats["scales_len"] = len(norm_scales)
+            stats["scales_min"] = float(min(norm_scales))
+            stats["scales_max"] = float(max(norm_scales))
+
+        norm_mask = self._normalize_scales(scale_mask)
+        if norm_mask:
+            mask_vals = [float(v) for v in norm_mask]
+            stats["scale_mask_ratio"] = float(sum(mask_vals) / len(mask_vals))
+        elif "scale_mask_ratio" not in stats:
             stats["scale_mask_ratio"] = None
 
         masked = _masked_scale_stats(scales, scale_mask)
@@ -956,10 +1126,10 @@ class VLLMGenerateCustom(VLLMChat):
         self,
         request: Instance,
         scale_entry: Dict[str, Any],
-    ) -> Tuple[dict, dict, float, Optional[int], Optional[Dict[str, Any]]]:
+    ) -> Tuple[dict, dict, float, Optional[int], Optional[Dict[str, Any]], Dict[str, Any]]:
         """
         Build vLLM input using precomputed scale entry for this request.
-        Returns: (vllm_inputs, sampling_params_dict, scale_means, visual_len, rescaled_mm_data)
+        Returns: (vllm_inputs, sampling_params_dict, scale_means, visual_len, rescaled_mm_data, effective_scale_entry)
         """
         import torch  # safe here (already in main proc)
 
@@ -1010,6 +1180,9 @@ class VLLMGenerateCustom(VLLMChat):
             audios = None
 
         packed_videos = None
+        chunk_selection_enabled = self.predictor_path is not None and (
+            self.predictor_keep_chunk_threshold is not None or self.predictor_keep_topk_chunks is not None
+        )
         if video_inputs is not None:
             packed_videos = [(v, m) for v, m in zip(video_inputs, video_metadatas)]
 
@@ -1019,7 +1192,7 @@ class VLLMGenerateCustom(VLLMChat):
                 video_inputs = None
                 video_metadatas = None
 
-            elif env_true("VIDEO2LIST"):
+            elif env_true("VIDEO2LIST") and not chunk_selection_enabled:
                 messages, packed_videos = video2list(
                     messages,
                     packed_videos,
@@ -1030,6 +1203,7 @@ class VLLMGenerateCustom(VLLMChat):
         scales = scale_entry.get("scales", None)
         scale_mask = scale_entry.get("scale_mask", None)
         scale_means = float(scale_entry.get("scale_means", 1.0))
+        effective_scale_entry = dict(scale_entry)
         temporal_patch_size = getattr(self.processor.video_processor, "temporal_patch_size", 1)
 
         if self.enable_baseline_scale and self.predictor_path is None:
@@ -1047,23 +1221,7 @@ class VLLMGenerateCustom(VLLMChat):
         scales, scale_mask = _ensure_2d_scale_tensors(scales, scale_mask)
         scale_mask = _align_scale_mask(scales, scale_mask)
         if scales is not None:
-            try:
-                if hasattr(scales, "float") and hasattr(scales, "mean"):
-                    scale_means = float(scales.float().mean().item())
-                elif isinstance(scales, (list, tuple)):
-                    flat_vals = []
-                    for row in scales:
-                        if isinstance(row, (list, tuple)):
-                            flat_vals.extend([v for v in row if isinstance(v, (int, float))])
-                        elif isinstance(row, (int, float)):
-                            flat_vals.append(row)
-                    if flat_vals:
-                        scale_means = float(sum(flat_vals) / len(flat_vals))
-            except Exception:
-                pass
-            masked = _masked_scale_stats(scales, scale_mask)
-            if masked is not None:
-                scale_means = masked[0]
+            scale_means = _compute_effective_scale_mean(scales, scale_mask, scale_means)
 
         rescaled_mm_data = None
         if scales is not None:
@@ -1076,13 +1234,31 @@ class VLLMGenerateCustom(VLLMChat):
                 patch_size=self.patch_size,
                 image_factor=self.image_factor,
                 temporal_patch_size=temporal_patch_size,
+                keep_topk_chunks=self.predictor_keep_topk_chunks if self.predictor_path is not None else None,
+                keep_chunk_threshold=self.predictor_keep_chunk_threshold if self.predictor_path is not None else None,
+                resize_kept_chunks=self.predictor_resize_kept_chunks,
             )[0]
+
+            updated_scales = mm_data.get("_adaptive_selected_scales", None)
+            updated_scale_mask = mm_data.get("_adaptive_selected_scale_mask", None)
+            if updated_scales is not None:
+                scales = updated_scales
+                scale_mask = updated_scale_mask
+                scale_means = _compute_effective_scale_mean(scales, scale_mask, scale_means)
+            effective_scale_entry = {
+                "scale_means": scale_means,
+                "scale_mask": scale_mask,
+                "scales": scales,
+            }
 
             images = mm_data.get("images", None)
             videos_scaled_flat = mm_data.get("videos", None)
             rescaled_mm_data = {
                 "images": images,
                 "videos": videos_scaled_flat,
+                "scales": scales,
+                "scale_mask": scale_mask,
+                "scale_means": scale_means,
             }
 
             if videos_scaled_flat is not None:
@@ -1141,7 +1317,7 @@ class VLLMGenerateCustom(VLLMChat):
 
         # Convert GPU tensors to CPU to prevent OOM during distributed gather
         rescaled_mm_data = self._to_cpu_mm_data(rescaled_mm_data)
-        return vllm_inputs, params, scale_means, visual_len, rescaled_mm_data
+        return vllm_inputs, params, scale_means, visual_len, rescaled_mm_data, effective_scale_entry
     
 
     def generate_until(self, requests: List[Instance]) -> List[str]:
@@ -1295,12 +1471,13 @@ class VLLMGenerateCustom(VLLMChat):
                     for r in batch_requests
                 ]
                 # keep order stable
-                for fut in futures:
-                    vllm_inputs, sampling_params_dict, scale_mean, visual_len, rescaled_mm_data = fut.result()
+                for req, fut in zip(batch_requests, futures):
+                    vllm_inputs, sampling_params_dict, scale_mean, visual_len, rescaled_mm_data, effective_scale_entry = fut.result()
                     batched_vllm_inputs.append(vllm_inputs)
                     scales_means.append(scale_mean)
                     visual_lens.append(visual_len)
                     rescaled_mms.append(rescaled_mm_data)
+                    scales_dict[self.make_compound_key_from_req(req)] = effective_scale_entry
 
             sampling_params = SamplingParams(**sampling_params_dict)
 

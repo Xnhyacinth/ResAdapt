@@ -613,7 +613,15 @@ class Qwen2_VL_Custom(lmms):
 
             texts = [self.processor.apply_chat_template(msg, tokenize=False, add_generation_prompt=True) for msg in batched_messages]
             # TODO: Consider moving video frame sampling logic into process_vision_info or a helper.
-            image_inputs, video_inputs = process_vision_info(batched_messages)
+            try:
+                image_inputs, video_inputs = process_vision_info(batched_messages)
+            except Exception as e:
+                eval_logger.warning(
+                    f"process_vision_info failed, fallback to visionthink.predictor.vision_process: {e}"
+                )
+                from visionthink.predictor.vision_process import process_vision_info as process_vision_info_local
+
+                image_inputs, video_inputs = process_vision_info_local(batched_messages)
             if video_inputs is not None and len(video_inputs) > 0 and video_inputs[0] is not None:
                 # Assuming video_inputs is a list where the first element holds the tensor
                 video_tensor = video_inputs[0]
@@ -976,7 +984,15 @@ class Qwen2_VL_Custom(lmms):
                     batched_messages.append(message)
 
                 texts = [self.processor.apply_chat_template(msg, tokenize=False, add_generation_prompt=True) for msg in batched_messages]
-                image_inputs, video_inputs = process_vision_info(batched_messages)
+                try:
+                    image_inputs, video_inputs = process_vision_info(batched_messages)
+                except Exception as e:
+                    eval_logger.warning(
+                        f"process_vision_info failed, fallback to visionthink.predictor.vision_process: {e}"
+                    )
+                    from visionthink.predictor.vision_process import process_vision_info as process_vision_info_local
+
+                    image_inputs, video_inputs = process_vision_info_local(batched_messages)
 
                 if video_inputs is not None and len(video_inputs) > 0 and video_inputs[0] is not None:
                     video_tensor = video_inputs[0]

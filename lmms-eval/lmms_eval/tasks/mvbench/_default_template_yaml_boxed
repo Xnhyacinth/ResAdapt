@@ -1,0 +1,5 @@
+include: _default_template_yaml
+generation_kwargs:
+  max_new_tokens: 64
+process_results: !function utils_boxed.mvbench_process_results
+

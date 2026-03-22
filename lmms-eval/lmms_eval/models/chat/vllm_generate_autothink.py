@@ -1,5 +1,8 @@
 import math
+import json
 import os
+import re
+import inspect
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
@@ -117,6 +120,31 @@ def _masked_scale_stats(scales: Any, scale_mask: Any) -> Optional[Tuple[float, f
         return None
     return float(sum(values) / len(values)), float(min(values)), float(max(values))
 
+
+def _build_vllm_sampling_params(params: Dict[str, Any]):
+    if SamplingParams is None:
+        raise RuntimeError("vllm.SamplingParams is unavailable")
+    try:
+        return SamplingParams(**params)
+    except TypeError as e:
+        try:
+            allowed = set(inspect.signature(SamplingParams).parameters.keys())
+            filtered = {k: v for k, v in params.items() if k in allowed}
+            return SamplingParams(**filtered)
+        except Exception:
+            msg = str(e)
+            filtered = dict(params)
+            for _ in range(16):
+                m = re.search(r"Unexpected keyword argument '([^']+)'", msg)
+                if not m:
+                    break
+                filtered.pop(m.group(1), None)
+                try:
+                    return SamplingParams(**filtered)
+                except TypeError as e2:
+                    msg = str(e2)
+            return SamplingParams(**filtered)
+
 from visionthink.adaptive.utils import (
     expand_image_prompt,
     apply_adaptive_scaling,
@@ -160,6 +188,9 @@ class VLLMGenerateAutoThink(VLLMChat):
         nframes: Optional[int] = 32,
         early_exit_thresh: float = 0.97,
         inference_mode: str = "auto",
+        log_visual_len: Optional[bool] = None,
+        predictor_max_scale: Optional[float] = None,
+        predictor_min_scale: Optional[float] = None,
         **kwargs,
     ):
         self.system_prompt = COT_SYSTEM_PROMPT_ANSWER_TWICE
@@ -168,10 +199,17 @@ class VLLMGenerateAutoThink(VLLMChat):
             raise ValueError(f"Invalid inference_mode: {self.inference_mode}")
         self.early_exit_thresh = early_exit_thresh
         self.add_sys = env_true("ADD_SYS", "1")
-        self.log_visual_len = env_true("LOG_VISUAL_LEN")
+        if log_visual_len is None:
+            self.log_visual_len = env_true("LOG_VISUAL_LEN")
+        elif isinstance(log_visual_len, str):
+            self.log_visual_len = str(log_visual_len).lower() in ("1", "true", "yes", "y", "t")
+        else:
+            self.log_visual_len = bool(log_visual_len)
         self.predictor_path = os.getenv("PREDICTOR_PATH", None)
         self.enable_baseline_scale = env_true("ENABLE_BASELINE_SCALE")
         self.scale_preprocess_retries = int(os.getenv("SCALE_PREPROCESS_RETRIES", "2"))
+        self.scale_preprocess_timeout_s = int(os.getenv("SCALE_PREPROCESS_TIMEOUT_S", "21600"))
+        self.scale_preprocess_chunk_size = int(os.getenv("SCALE_PREPROCESS_CHUNK_SIZE", "30000"))
         self.workers = int(os.getenv("WORKERS", str(WORKERS)))
         self.micro_batch = int(os.getenv("MICRO_BATCH", str(MICRO_BATCH)))
         self.max_inflight_per_gpu = int(os.getenv("max_inflight_per_gpu", str(max_inflight_per_gpu)))
@@ -195,8 +233,34 @@ class VLLMGenerateAutoThink(VLLMChat):
             max_frames=max_frame_num // 2 if self.predictor_path is not None and "smol" not in self.predictor_path else max_frame_num,
             schedule_policy=os.getenv("PREDICTOR_SCHED_POLICY", "least_inflight"),
         )
+        if predictor_max_scale is None:
+            try:
+                predictor_max_scale = float(os.getenv("PREDICTOR_MAX_SCALE", ""))
+            except Exception:
+                predictor_max_scale = None
+        if predictor_min_scale is None:
+            try:
+                predictor_min_scale = float(os.getenv("PREDICTOR_MIN_SCALE", ""))
+            except Exception:
+                predictor_min_scale = None
+        if isinstance(predictor_max_scale, (int, float)):
+            self._pool_kwargs["max_scale"] = float(predictor_max_scale)
+        if isinstance(predictor_min_scale, (int, float)):
+            self._pool_kwargs["min_scale"] = float(predictor_min_scale)
         self.pool = None
         self._scales_missing_max_warn = 5
+        self.scale_preprocess_failures: List[Tuple[str, str]] = []
+        self._predictor_scales_cache_base: Optional[str] = None
+        self._predictor_scales_cache_loaded: Dict[str, bool] = {}
+        self._predictor_scales_cache_mem: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self._predictor_scales_cache_frames = int(self._pool_kwargs.get("max_frames", max_frame_num))
+        if self.predictor_path is not None:
+            try:
+                expanded = os.path.expanduser(self.predictor_path)
+                if os.path.isdir(expanded):
+                    self._predictor_scales_cache_base = os.path.join(expanded, "benchmarks")
+            except Exception:
+                self._predictor_scales_cache_base = None
 
         super().__init__(
             model,
@@ -240,6 +304,229 @@ class VLLMGenerateAutoThink(VLLMChat):
         elif not self._is_main_rank and self.predictor_path is not None:
             print(f"[VLLMGenerateAutoThink] [Rank {os.getenv('RANK', '?')}] Waiting for rank 0 to run predictor")
 
+    def _sanitize_benchmark_name(self, name: str) -> str:
+        name = str(name)
+        name = name.replace(os.sep, "_")
+        name = name.replace("..", "_")
+        return name
+
+    def _normalize_benchmark_for_cache(self, benchmark: str) -> str:
+        b = str(benchmark)
+        return b[:-6] if b.endswith("_boxed") else b
+
+    def _normalize_compound_key_for_cache(self, compound_key: Any) -> Any:
+        if not isinstance(compound_key, str):
+            return compound_key
+        if "::" not in compound_key:
+            return compound_key
+        task, rest = compound_key.split("::", 1)
+        task = self._normalize_benchmark_for_cache(task)
+        return f"{task}::{rest}"
+
+    def _format_scale_for_cache(self, v: Any) -> Optional[str]:
+        if v is None:
+            return None
+        try:
+            fv = float(v)
+        except Exception:
+            return None
+        if not (fv > 0):
+            return None
+        s = f"{fv:.6f}".rstrip("0").rstrip(".")
+        return s if s else None
+
+    def _predictor_scales_cache_file_tag(self) -> str:
+        min_s = self._format_scale_for_cache(self._pool_kwargs.get("min_scale", None))
+        max_s = self._format_scale_for_cache(self._pool_kwargs.get("max_scale", None))
+        tag = ""
+        if min_s is not None:
+            tag += f"_min{min_s}"
+        if max_s is not None:
+            tag += f"_max{max_s}"
+        return tag
+
+    def _predictor_scales_cache_key(self, benchmark: str) -> str:
+        bench = self._sanitize_benchmark_name(benchmark)
+        return f"{bench}::frames{self._predictor_scales_cache_frames}{self._predictor_scales_cache_file_tag()}"
+
+    def _scale_entry_jsonable(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        def _to_jsonable(obj: Any) -> Any:
+            if obj is None:
+                return None
+            if hasattr(obj, "tolist"):
+                try:
+                    return obj.tolist()
+                except Exception:
+                    pass
+            try:
+                import torch
+                if torch.is_tensor(obj):
+                    return obj.detach().cpu().tolist()
+            except Exception:
+                pass
+            if isinstance(obj, dict):
+                return {k: _to_jsonable(v) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                return [_to_jsonable(v) for v in obj]
+            if isinstance(obj, (int, float, str, bool)):
+                return obj
+            return str(obj)
+
+        return {
+            "scale_mask": _to_jsonable(entry.get("scale_mask", None)),
+            "scales": _to_jsonable(entry.get("scales", None)),
+        }
+
+    def _compute_scale_means_from_scales(self, scales: Any) -> float:
+        vals: List[float] = []
+        if hasattr(scales, "tolist"):
+            try:
+                scales = scales.tolist()
+            except Exception:
+                pass
+        if isinstance(scales, (int, float)):
+            vals.append(float(scales))
+        elif isinstance(scales, (list, tuple)):
+            def _flatten(x: Any) -> None:
+                if isinstance(x, (int, float)):
+                    vals.append(float(x))
+                    return
+                if isinstance(x, (list, tuple)):
+                    for y in x:
+                        _flatten(y)
+            _flatten(scales)
+        return float(sum(vals) / len(vals)) if vals else 1.0
+
+    def _cache_entry_to_runtime_entry(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        scales = entry.get("scales", None)
+        scale_mask = entry.get("scale_mask", None)
+        return {
+            "scale_means": self._compute_scale_means_from_scales(scales) if scales is not None else 1.0,
+            "scale_mask": scale_mask,
+            "scales": scales,
+        }
+
+    def _load_predictor_scales_cache(self, benchmark: str) -> Dict[str, Dict[str, Any]]:
+        if self._predictor_scales_cache_base is None:
+            return {}
+        cache_key = self._predictor_scales_cache_key(benchmark)
+        if self._predictor_scales_cache_loaded.get(cache_key, False):
+            return self._predictor_scales_cache_mem.get(cache_key, {})
+        cache: Dict[str, Dict[str, Any]] = {}
+        try:
+            tag = self._predictor_scales_cache_file_tag()
+            candidates = [str(benchmark)]
+            if not str(benchmark).endswith("_boxed"):
+                candidates.append(str(benchmark) + "_boxed")
+
+            found_any = False
+            for cand in candidates:
+                bench = self._sanitize_benchmark_name(cand)
+                bench_dir = os.path.join(self._predictor_scales_cache_base, bench)
+                cache_file = os.path.join(bench_dir, f"scales_{self._predictor_scales_cache_frames}{tag}.jsonl")
+                if not os.path.exists(cache_file):
+                    continue
+                found_any = True
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            payload = json.loads(line)
+                        except Exception:
+                            continue
+                        key = payload.get("key", None)
+                        entry = payload.get("entry", None)
+                        if not isinstance(key, str) or not isinstance(entry, dict):
+                            continue
+                        if entry.get("scales", None) is None:
+                            continue
+                        cache[key] = self._cache_entry_to_runtime_entry(entry)
+
+            if not found_any:
+                bench = self._sanitize_benchmark_name(benchmark)
+                bench_dir = os.path.join(self._predictor_scales_cache_base, bench)
+                cache_file = os.path.join(bench_dir, f"scales_{self._predictor_scales_cache_frames}{tag}.jsonl")
+                print(f"[VLLMGenerateAutoThink] No predictor scales cache for task={benchmark} frames={self._predictor_scales_cache_frames}: {cache_file}")
+        except Exception:
+            cache = {}
+        self._predictor_scales_cache_mem[cache_key] = cache
+        self._predictor_scales_cache_loaded[cache_key] = True
+        return cache
+
+    def _append_predictor_scales_cache(self, benchmark: str, entries: Dict[str, Dict[str, Any]]) -> None:
+        if self._predictor_scales_cache_base is None:
+            return
+        if not entries:
+            return
+        bench = self._sanitize_benchmark_name(benchmark)
+        bench_dir = os.path.join(self._predictor_scales_cache_base, bench)
+        os.makedirs(bench_dir, exist_ok=True)
+        cache_file = os.path.join(
+            bench_dir,
+            f"scales_{self._predictor_scales_cache_frames}{self._predictor_scales_cache_file_tag()}.jsonl",
+        )
+        cache_mem = self._load_predictor_scales_cache(bench)
+        try:
+            with open(cache_file, "a", encoding="utf-8") as f:
+                for key, entry in entries.items():
+                    if not isinstance(key, str) or not isinstance(entry, dict):
+                        continue
+                    if key in cache_mem:
+                        continue
+                    if entry.get("scales", None) is None:
+                        continue
+                    jsonable = self._scale_entry_jsonable(entry)
+                    f.write(json.dumps({"key": key, "entry": jsonable}, ensure_ascii=False) + "\n")
+                    cache_mem[key] = self._cache_entry_to_runtime_entry(jsonable)
+        except Exception:
+            return
+
+    def _get_scales_with_disk_cache(self, payloads: List[dict], keys: List[str]) -> Dict[str, Dict[str, Any]]:
+        if self.predictor_path is None or self._predictor_scales_cache_base is None or not keys:
+            return self._submit_payloads_with_retries(payloads, keys)
+        cached: Dict[str, Dict[str, Any]] = {}
+        missing_payloads: List[dict] = []
+        missing_keys: List[str] = []
+        for key, payload in zip(keys, payloads):
+            task = None
+            if isinstance(payload, dict):
+                task = payload.get("_task", None)
+            if not isinstance(task, str) and isinstance(key, str) and "::" in key:
+                task = key.split("::", 1)[0]
+            if not isinstance(task, str) or not task:
+                missing_payloads.append(payload)
+                missing_keys.append(key)
+                continue
+            cache_task = self._normalize_benchmark_for_cache(task)
+            cache_key = self._normalize_compound_key_for_cache(key)
+            cache = self._load_predictor_scales_cache(cache_task)
+            hit = cache.get(cache_key, None)
+            if isinstance(hit, dict) and hit.get("scales", None) is not None:
+                cached[key] = hit
+            else:
+                missing_payloads.append(payload)
+                missing_keys.append(key)
+        predicted: Dict[str, Dict[str, Any]] = {}
+        if missing_keys:
+            predicted = self._submit_payloads_with_retries(missing_payloads, missing_keys)
+            by_task: Dict[str, Dict[str, Dict[str, Any]]] = {}
+            for key, entry in predicted.items():
+                if not isinstance(entry, dict) or entry.get("scales", None) is None:
+                    continue
+                task = key.split("::", 1)[0] if isinstance(key, str) and "::" in key else None
+                if not isinstance(task, str) or not task:
+                    continue
+                cache_task = self._normalize_benchmark_for_cache(task)
+                cache_key = self._normalize_compound_key_for_cache(key)
+                by_task.setdefault(cache_task, {})[cache_key] = entry
+            for task, task_entries in by_task.items():
+                self._append_predictor_scales_cache(task, task_entries)
+        out = dict(cached)
+        out.update(predicted)
+        return out
+
     def _compute_visual_len(self, text, images, videos, video_metadatas):
         if images is None and videos is None:
             return 0
@@ -249,7 +536,16 @@ class VLLMGenerateAutoThink(VLLMChat):
         if videos is not None:
             proc_kwargs["videos"] = videos
             if video_metadatas is not None:
-                proc_kwargs["videos_kwargs"] = {"video_metadata": video_metadatas, "do_sample_frames": False}
+                if isinstance(video_metadatas, (list, tuple)):
+                    cleaned_metadatas = []
+                    for meta in video_metadatas:
+                        if isinstance(meta, dict) and "video_timestamps" in meta:
+                            cleaned_metadatas.append({k: v for k, v in meta.items() if k != "video_timestamps"})
+                        else:
+                            cleaned_metadatas.append(meta)
+                    proc_kwargs["videos_kwargs"] = {"video_metadata": cleaned_metadatas, "do_sample_frames": False}
+                else:
+                    proc_kwargs["videos_kwargs"] = {"video_metadata": video_metadatas, "do_sample_frames": False}
         try:
             outputs = self.processor(text=[text], **proc_kwargs)
         except Exception:
@@ -523,8 +819,6 @@ class VLLMGenerateAutoThink(VLLMChat):
             "_compound_id": compound_key,
         }
         return compound_key, payload
-
-        return compound_key, payload
     
     def _submit_payloads_with_retries(self, payloads: List[dict], keys: List[str]) -> Dict[str, Dict[str, Any]]:
         """Submit payloads to pool with retries, returning results dict."""
@@ -538,32 +832,43 @@ class VLLMGenerateAutoThink(VLLMChat):
         attempt = 0
         mismatch_count = 0
         while pending_payloads and attempt <= self.scale_preprocess_retries:
-            outs = self.pool.submit_many_sync(pending_payloads, timeout=9600)
-            next_payloads: List[dict] = []
-            next_keys: List[str] = []
-            for i, out in enumerate(outs):
-                compound = pending_keys[i]
-                if isinstance(out, Exception):
-                    next_payloads.append(pending_payloads[i])
-                    next_keys.append(compound)
-                    self.scale_preprocess_failures.append((compound, str(out)))
+            timeout_s = int(self.scale_preprocess_timeout_s) * max(1, attempt + 1)
+            chunk_size = max(1, int(self.scale_preprocess_chunk_size))
+            next_payloads = []
+            next_keys = []
+            for start in range(0, len(pending_payloads), chunk_size):
+                chunk_payloads = pending_payloads[start : start + chunk_size]
+                chunk_keys = pending_keys[start : start + chunk_size]
+                try:
+                    outs = self.pool.submit_many_sync(chunk_payloads, timeout=timeout_s)
+                except Exception as e:
+                    print(f"[VLLMGenerateAutoThink] Scale preprocess batch exception (attempt={attempt}) size={len(chunk_keys)}: {e}")
+                    for ck, cp in zip(chunk_keys, chunk_payloads):
+                        next_payloads.append(cp)
+                        next_keys.append(ck)
+                        self.scale_preprocess_failures.append((ck, str(e)))
                     continue
-                if isinstance(out, dict) and not out.get("ok", True):
-                    next_payloads.append(pending_payloads[i])
-                    next_keys.append(compound)
-                    continue
-                ret_compound = out.get("_compound_id", compound) if isinstance(out, dict) else compound
-                if ret_compound != compound:
-                    mismatch_count += 1
-                    if mismatch_count <= 5:
-                        print(f"[VLLMGenerateAutoThink] WARNING: compound mismatch expected={compound} got={ret_compound}")
-                    # Note: Use original compound key, not ret_compound, to ensure proper matching
-                # Always use original compound key for results storage
-                results[compound] = {
-                    "scale_means": out.get("scale_means", 1.0),
-                    "scale_mask": out.get("scale_mask", None),
-                    "scales": out.get("scales", None),
-                }
+                for i, out in enumerate(outs):
+                    compound = chunk_keys[i]
+                    if isinstance(out, Exception):
+                        next_payloads.append(chunk_payloads[i])
+                        next_keys.append(compound)
+                        self.scale_preprocess_failures.append((compound, str(out)))
+                        continue
+                    if isinstance(out, dict) and not out.get("ok", True):
+                        next_payloads.append(chunk_payloads[i])
+                        next_keys.append(compound)
+                        continue
+                    ret_compound = out.get("_compound_id", compound) if isinstance(out, dict) else compound
+                    if ret_compound != compound:
+                        mismatch_count += 1
+                        if mismatch_count <= 5:
+                            print(f"[VLLMGenerateAutoThink] WARNING: compound mismatch expected={compound} got={ret_compound}")
+                    results[compound] = {
+                        "scale_means": out.get("scale_means", 1.0),
+                        "scale_mask": out.get("scale_mask", None),
+                        "scales": out.get("scales", None),
+                    }
             pending_payloads = next_payloads
             pending_keys = next_keys
             attempt += 1
@@ -598,8 +903,7 @@ class VLLMGenerateAutoThink(VLLMChat):
             compound_key, payload = self._prepare_scale_payload(req)
             payloads.append(payload)
             keys.append(compound_key)
-            
-        return self._submit_payloads_with_retries(payloads, keys)
+        return self._get_scales_with_disk_cache(payloads, keys)
 
     def _make_one_request_with_scale(
         self,
@@ -629,7 +933,8 @@ class VLLMGenerateAutoThink(VLLMChat):
         if until:
             params["stop"] = until
         params.setdefault("logprobs", True)
-        params.setdefault("top_logprobs", 1)
+        if isinstance(params.get("logprobs", None), bool):
+            params["logprobs"] = 1
         video_kwargs = self._build_video_kwargs()
         messages = chat_messages.to_hf_messages(video_kwargs=video_kwargs)
         images, videos, audios = chat_messages.extract_media()
@@ -737,11 +1042,16 @@ class VLLMGenerateAutoThink(VLLMChat):
             vllm_inputs["multi_modal_data"]["video"] = []
             for video_input, video_metadata in zip(video_inputs, video_metadatas):
                 if "Qwen3VL" in type(self.processor).__name__:
+                    if isinstance(video_metadata, dict) and "video_timestamps" in video_metadata:
+                        video_metadata = {k: v for k, v in video_metadata.items() if k != "video_timestamps"}
                     vllm_inputs["multi_modal_data"]["video"].append((video_input, video_metadata))
                 else:
                     vllm_inputs["multi_modal_data"]["video"].append(video_input)
             vllm_inputs["mm_processor_kwargs"] = {**mm_kwargs}
         visual_len = self._compute_visual_len(text, images, video_inputs, video_metadatas) if self.log_visual_len else None
+        if self.log_visual_len and (images is not None or video_inputs is not None):
+            if visual_len is None or (isinstance(visual_len, int) and visual_len <= 0):
+                visual_len = 1
         return vllm_inputs, params, scale_means, visual_len
 
     def _extract_boxed_segments(self, text: str) -> List[str]:
@@ -907,7 +1217,8 @@ class VLLMGenerateAutoThink(VLLMChat):
             params["stop"] = until
         # enable token logprobs for potential confidence-based selection
         params.setdefault("logprobs", True)
-        params.setdefault("top_logprobs", 1)
+        if isinstance(params.get("logprobs", None), bool):
+            params["logprobs"] = 1
 
         video_kwargs = {
             "max_pixels": self.max_pixels,
@@ -956,13 +1267,16 @@ class VLLMGenerateAutoThink(VLLMChat):
             vllm_inputs["multi_modal_data"]["video"] = []
             for video_input, video_metadata in zip(video_inputs, video_metadatas):
                 if "Qwen3VL" in type(self.processor).__name__:
+                    if isinstance(video_metadata, dict) and "video_timestamps" in video_metadata:
+                        video_metadata = {k: v for k, v in video_metadata.items() if k != "video_timestamps"}
                     video_input = (video_input, video_metadata)
                 vllm_inputs["multi_modal_data"]["video"].append(video_input)
-                vllm_inputs["mm_processor_kwargs"] = {
-                    **kwargs,
-                }
+            vllm_inputs["mm_processor_kwargs"] = {**kwargs}
 
         visual_len = self._compute_visual_len(text, images, video_inputs, video_metadatas) if self.log_visual_len else None
+        if self.log_visual_len and (images is not None or video_inputs is not None):
+            if visual_len is None or (isinstance(visual_len, int) and visual_len <= 0):
+                visual_len = 1
         return vllm_inputs, params, visual_len
 
     def generate_until(self, requests) -> List[str]:
@@ -1026,7 +1340,7 @@ class VLLMGenerateAutoThink(VLLMChat):
                 # 2. Run predictor pool on all gathered payloads
                 try:
                     t0 = time.time()
-                    all_scales_dict = self._submit_payloads_with_retries(all_payloads, all_keys)
+                    all_scales_dict = self._get_scales_with_disk_cache(all_payloads, all_keys)
                     scale_preprocess_s = time.time() - t0
                     print(f"[VLLMGenerateAutoThink] [Rank 0] Scale preprocessing took {scale_preprocess_s:.2f}s for {len(all_keys)} gathered items")
                 except Exception as e:
@@ -1127,7 +1441,7 @@ class VLLMGenerateAutoThink(VLLMChat):
                         batched_vllm_inputs.append(vllm_inputs)
                         visual_lens.append(visual_len)
 
-            sampling_params = SamplingParams(**sampling_params)
+            sampling_params = _build_vllm_sampling_params(sampling_params)
             start_time = time.time()
             response = self.client.generate(batched_vllm_inputs, sampling_params)
             end_time = time.time()

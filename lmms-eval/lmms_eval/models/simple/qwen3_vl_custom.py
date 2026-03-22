@@ -531,12 +531,25 @@ class Qwen3_VL_Custom(lmms):
                 batched_messages.append(message)
             texts = self.processor.apply_chat_template(batched_messages, tokenize=False, add_generation_prompt=True)
             # TODO: refactor code to allow return_video_kwargs and return_video_metadata
-            image_inputs, video_inputs = process_vision_info(
-                batched_messages,
-                return_video_kwargs=False,
-                image_patch_size=16,
-                return_video_metadata=False,
-            )
+            try:
+                image_inputs, video_inputs = process_vision_info(
+                    batched_messages,
+                    return_video_kwargs=False,
+                    image_patch_size=16,
+                    return_video_metadata=False,
+                )
+            except Exception as e:
+                eval_logger.warning(
+                    f"process_vision_info failed, fallback to visionthink.predictor.vision_process: {e}"
+                )
+                from visionthink.predictor.vision_process import process_vision_info as process_vision_info_local
+
+                image_inputs, video_inputs = process_vision_info_local(
+                    batched_messages,
+                    return_video_kwargs=False,
+                    image_patch_size=16,
+                    return_video_metadata=False,
+                )
             if video_inputs is not None:
                 total_frames = video_inputs[0].shape[0]
                 indices = np.linspace(0, total_frames - 1, self.max_num_frames, dtype=int)
@@ -567,13 +580,30 @@ class Qwen3_VL_Custom(lmms):
                 )
             input_ids = inputs["input_ids"][0]
             video_pad_id = self.tokenizer.convert_tokens_to_ids("<|video_pad|>")
-            target_idxs = torch.where(input_ids == video_pad_id)[0]
-            if target_idxs.numel() > 0 and "video_grid_thw" in inputs:
+            image_pad_id = self.tokenizer.convert_tokens_to_ids("<|image_pad|>")
+            video_target_idxs = torch.where(input_ids == video_pad_id)[0]
+            image_target_idxs = torch.where(input_ids == image_pad_id)[0]
+            target_idxs = torch.tensor([], device=input_ids.device, dtype=torch.long)
+            grid_key = None
+            is_video = False
+            if video_target_idxs.numel() > 0 and "video_grid_thw" in inputs:
+                target_idxs = video_target_idxs
+                grid_key = "video_grid_thw"
+                is_video = True
+            elif image_target_idxs.numel() > 0 and "image_grid_thw" in inputs:
+                target_idxs = image_target_idxs
+                grid_key = "image_grid_thw"
+                is_video = False
+
+            if target_idxs.numel() > 0 and grid_key is not None:
                 target_start_idx = target_idxs[0].item()
                 target_end_idx = target_idxs[-1].item()
-                grid = inputs["video_grid_thw"].squeeze().tolist()
+                grid = inputs[grid_key].squeeze().tolist()
+                if isinstance(grid, list) and len(grid) > 0 and isinstance(grid[0], list):
+                    grid = grid[0]
                 T, H, W = grid
-                merge_size = getattr(self.processor.video_processor, "merge_size", 1)
+                vp = self.processor.video_processor if is_video else getattr(self.processor, "image_processor", self.processor.video_processor)
+                merge_size = getattr(vp, "merge_size", 1)
                 if merge_size is None:
                     merge_size = 1
                 H = H // merge_size
@@ -581,13 +611,14 @@ class Qwen3_VL_Custom(lmms):
             else:
                 target_start_idx = 0
                 target_end_idx = 0
-                T, H, W = 0, 0, 0
+                T, H, W = 1, 0, 0
 
             prompt_stat = {
                 "sys": target_start_idx,
                 "inst": len(input_ids) - (target_end_idx + 1),
-                "frame": T,
+                "frame": T if is_video else 1,
                 "video": len(target_idxs),
+                "image": len(target_idxs) if not is_video else 0,
                 "T": T,
                 "H": H,
                 "W": W,
