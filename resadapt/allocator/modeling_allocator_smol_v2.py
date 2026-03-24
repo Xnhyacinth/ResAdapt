@@ -693,8 +693,26 @@ if __name__ == "__main__":
         }
     ]
 
-    # save_path = "YOUR_WORKSPACE_PATH/models/allocator_smolv4"
-    # model.save_pretrained(save_path, safe_serialization=True)
+    save_path = ""
+    if save_path:
+        model.save_pretrained(save_path, safe_serialization=True)
+        import shutil
+        import json
+        shutil.copy(__file__, save_path)
+        config_path = os.path.join(save_path, "config.json")
+        if os.path.exists(config_path):
+            with open(config_path, "r") as f:
+                config_data = json.load(f)
+            module_name = os.path.basename(__file__).replace(".py", "")
+            auto_map_dict = {
+                "AutoConfig": f"{module_name}.SmolAllocatorConfig",
+                "AutoModel": f"{module_name}.SmolAllocatorForConditionalGeneration",
+                "AutoModelForVision2Seq": f"{module_name}.SmolAllocatorForConditionalGeneration"
+            }
+            new_config = {"auto_map": auto_map_dict}
+            new_config.update(config_data)
+            with open(config_path, "w") as f:
+                json.dump(new_config, f, indent=2)
     out = model.scale_multi_modal(messages=messages, return_mm_data=False, eval_mode=True)
     out_text = model.scale_multi_modal(messages=messages_text, return_mm_data=False, eval_mode=True)
     print({k: (v.shape if torch.is_tensor(v) else v) for k, v in out.items()})
