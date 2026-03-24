@@ -1801,12 +1801,144 @@ def process_video_list(
         )
         return processed_frames_local.cpu() if hasattr(processed_frames_local, "cpu") else processed_frames_local
 
+    def _extract_original_video_and_metadata(video_item: Any) -> Tuple[Any, Optional[Any]]:
+        if isinstance(video_item, tuple):
+            return video_item[0], video_item[1]
+        return video_item, None
+
+    def _build_selected_video_metadata(
+        original_metadata_local: Optional[Any],
+        *,
+        num_frames_local: int,
+        selected_frame_indices_local: List[int],
+    ) -> Dict[str, Any]:
+        if isinstance(original_metadata_local, dict):
+            selected_metadata_local = dict(original_metadata_local)
+        elif isinstance(original_metadata_local, list) and len(original_metadata_local) > 0 and isinstance(original_metadata_local[0], dict):
+            selected_metadata_local = dict(original_metadata_local[0])
+        else:
+            selected_metadata_local = {}
+
+        selected_metadata_local.pop("video_timestamps", None)
+        frame_indices_local = selected_metadata_local.get("frames_indices", None)
+        if isinstance(frame_indices_local, (list, tuple)) and len(frame_indices_local) >= num_frames_local:
+            frame_indices_local = list(frame_indices_local)
+            selected_metadata_local["frames_indices"] = [frame_indices_local[idx] for idx in selected_frame_indices_local]
+        else:
+            selected_metadata_local["frames_indices"] = [int(idx) for idx in selected_frame_indices_local]
+        return selected_metadata_local
+
+    def _select_frame_indices_noresize(
+        *,
+        frame_scores_local: torch.Tensor,
+        frame_mask_local: torch.Tensor,
+    ) -> List[int]:
+        # In per-frame noresize mode:
+        # - topk is a frame budget
+        # - threshold first keeps surviving frames, then backfills the highest remaining valid
+        #   frames so the final retained length rounds up to a multiple of ``temporal_patch_size``
+        valid_indices_local = [idx for idx in range(frame_scores_local.numel()) if bool(frame_mask_local[idx].item())]
+        if not valid_indices_local:
+            return []
+
+        ranked_indices_local = sorted(
+            valid_indices_local,
+            key=lambda idx: (-float(frame_scores_local[idx].item()), idx),
+        )
+
+        if selection_mode == "topk":
+            target_count_local = min(len(valid_indices_local), int(keep_topk_chunks))
+            if target_count_local <= 0:
+                return []
+            rounded_count_local = min(
+                len(valid_indices_local),
+                int(math.ceil(target_count_local / temporal_patch_size) * temporal_patch_size),
+            )
+            chosen_indices_local = ranked_indices_local[:rounded_count_local]
+        else:
+            chosen_indices_local = [
+                idx for idx in valid_indices_local if float(frame_scores_local[idx].item()) >= float(keep_chunk_threshold)
+            ]
+            if not chosen_indices_local:
+                fallback_count_local = min(len(valid_indices_local), temporal_patch_size)
+                chosen_indices_local = ranked_indices_local[:fallback_count_local]
+            else:
+                rounded_count_local = min(
+                    len(valid_indices_local),
+                    int(math.ceil(len(chosen_indices_local) / temporal_patch_size) * temporal_patch_size),
+                )
+                chosen_indices_local = ranked_indices_local[:rounded_count_local]
+
+        return sorted(chosen_indices_local)
+
     if selection_mode is not None:
+        scale_mode = _infer_global_scale_mode()
+
+        if not resize_kept_chunks and scale_mode == "per_frame":
+            flat_chunks: List[Tuple[torch.Tensor, Dict[str, Any]]] = []
+            structured_chunks: List[List[Tuple[torch.Tensor, Dict[str, Any]]]] = []
+            chunk_scale_offset = 0
+            full_segments: List[torch.Tensor] = []
+            mask_segments: List[torch.Tensor] = []
+
+            for video_idx, video in enumerate(videos):
+                video_frames, original_metadata = _extract_original_video_and_metadata(video)
+                num_frames = int(video_frames.shape[0])
+                if num_frames == 0:
+                    structured_chunks.append([])
+                    full_segments.append(torch.tensor([], dtype=torch.float32))
+                    mask_segments.append(torch.tensor([], dtype=torch.bool))
+                    continue
+
+                scale_start = start_obj_idx + chunk_scale_offset
+                scale_end = scale_start + num_frames
+                assert_valid_scale_index(scales_row, scale_end - 1, context=f"noresize_full_video[{video_idx}]")
+
+                frame_scores = scales_row[scale_start:scale_end].detach().to(torch.float32).clone()
+                if scale_mask_row is not None:
+                    frame_mask = scale_mask_row[scale_start:scale_end].detach().bool().clone()
+                    frame_scores = torch.where(frame_mask, frame_scores, torch.zeros_like(frame_scores))
+                else:
+                    frame_mask = torch.ones(num_frames, dtype=torch.bool, device=frame_scores.device)
+
+                selected_frame_indices = _select_frame_indices_noresize(
+                    frame_scores_local=frame_scores,
+                    frame_mask_local=frame_mask,
+                )
+                selected_index_tensor = torch.tensor(selected_frame_indices, dtype=torch.long, device=video_frames.device)
+                selected_video_frames = (
+                    video_frames.index_select(0, selected_index_tensor).cpu()
+                    if selected_frame_indices
+                    else video_frames[:0].cpu()
+                )
+                selected_metadata = _build_selected_video_metadata(
+                    original_metadata,
+                    num_frames_local=num_frames,
+                    selected_frame_indices_local=selected_frame_indices,
+                )
+                selected_video = (selected_video_frames, selected_metadata)
+                flat_chunks.append(selected_video)
+                structured_chunks.append([selected_video])
+
+                full = torch.zeros(num_frames, dtype=torch.float32)
+                if selected_frame_indices:
+                    full_cpu_idx = torch.tensor(selected_frame_indices, dtype=torch.long)
+                    full[full_cpu_idx] = 1.0
+                mask_full = frame_mask.cpu() if frame_mask.device.type != "cpu" else frame_mask.clone()
+                full = torch.where(mask_full, full, torch.zeros_like(full))
+                full_segments.append(full)
+                mask_segments.append(mask_full)
+
+                chunk_scale_offset += num_frames
+
+            selected_scales_tensor = torch.cat(full_segments)
+            selected_mask_tensor = torch.cat(mask_segments)
+            return flat_chunks, structured_chunks, chunk_scale_offset, selected_scales_tensor, selected_mask_tensor
+
         flat_chunks: List[Tuple[torch.Tensor, Dict[str, Any]]] = []
         structured_chunks: List[List[Tuple[torch.Tensor, Dict[str, Any]]]] = []
         descriptors: List[Dict[str, Any]] = []
         chunk_scale_offset = 0
-        scale_mode = _infer_global_scale_mode()
         video_infos: List[Dict[str, Any]] = []
 
         for video_idx, video in enumerate(videos):
@@ -1875,8 +2007,14 @@ def process_video_list(
         if selection_mode == "threshold":
             selected_orders = {desc["global_order"] for desc in descriptors if desc["compare_scale"] >= float(keep_chunk_threshold)}
         else:
-            ranked = sorted(descriptors, key=lambda d: (-d["compare_scale"], d["global_order"]))
-            selected_orders = {desc["global_order"] for desc in ranked[: int(keep_topk_chunks)]}
+            selected_orders = set()
+            if scale_mode == "per_frame":
+                chunk_budget = max(1, int(math.ceil(int(keep_topk_chunks) / temporal_patch_size)))
+            else:
+                chunk_budget = int(keep_topk_chunks)
+            for group in descriptors_by_video.values():
+                ranked = sorted(group, key=lambda d: (-d["compare_scale"], d["global_order"]))
+                selected_orders.update(desc["global_order"] for desc in ranked[:chunk_budget])
 
         for group in descriptors_by_video.values():
             if any(desc["global_order"] in selected_orders for desc in group):

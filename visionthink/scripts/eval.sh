@@ -1,5 +1,6 @@
 export HF_HUB_OFFLINE=True
 pip install httpx==0.23.3
+pip install chardet==5.2.0
 export PYTHONPATH=/mnt/bn/jiangzhongtao/users/liaohuanxuan/visionthink:$PYTHONPATH
 export OPENAI_API_URL="https://gpt-i18n.byteintl.net/gpt/openapi/online/v2/crawl/openai/deployments/gpt_openapi"
 export OPENAI_API_KEY="dxMlgIJpXgkdou8z77OKt5rg4BQjwgJZ_GPT_AK"
@@ -10,14 +11,19 @@ export MODEL_VERSION="gpt-5-2025-08-07"
 # Predictor temporal chunk retention (vllm_generate_custom; mutually exclusive threshold vs top-k):
 #   Env (optional, not cleared by unset at top — same pattern as PREDICTOR_MAX_SCALE):
 #     export PREDICTOR_KEEP_CHUNK_THRESHOLD=0.5   # keep chunks whose mean scale >= threshold
-#     export PREDICTOR_KEEP_TOPK_CHUNKS=3         # keep top-k chunks by mean scale (overrides threshold if both set)
+#     export PREDICTOR_KEEP_TOPK_CHUNKS=32        # frame budget for top-k selection
 #     export PREDICTOR_RESIZE_KEPT_CHUNKS=0       # 0/false: no resize-to-original after selection
+#     export PREDICTOR_TOPK_SELECTOR=pass         # greedy|pass
+#     export PREDICTOR_TOPK_UNIT=chunk            # auto|frame|chunk
 #   method (arg 10) or predictor_chunk (arg 12) substrings:
 #     chunk_th0.5       -> threshold 0.5
-#     chunk_topk3       -> top-k 3
+#     chunk_topk32      -> top-k frame budget 32
 #     chunk_noresize    -> resize kept chunks off
+#     chunk_pass        -> PASS-style peak+diffusion selector for frame top-k
+#     chunk_bychunk     -> select chunks by mean scale using ceil(topk / temporal_patch_size)
 #   Example: ./eval.sh ... method0 chunk_th0.5_chunk_noresize
-#            ./eval.sh ... method0 0 0 0 0 0 0 0 logs 0 0 0 chunk_topk2
+#            ./eval.sh ... method0 0 0 0 0 0 0 0 logs 0 0 0 chunk_topk32_chunk_pass
+#            ./eval.sh ... method0 0 0 0 0 0 0 0 logs 0 0 0 chunk_topk32_chunk_bychunk_chunk_noresize
 
 unset PREDICTOR_PATH ENABLE_BASELINE_SCALE BASELINE_SCALE_FACTOR USE_DEBUG MICRO_BATCH WORKERS max_inflight_per_gpu
 unset CONVERT2IMAGES REMOVEPAD VLLM_MROPE_PATCH VIDEO2LIST VIDEO2IMAGE ADD_SYS
@@ -88,7 +94,7 @@ if [[ "$task_type" == *"video_inc"* ]]; then
     tasks="videomme_inc,longvideobench_val_v_inc"
 elif [[ "$task_type" == *"video"* ]]; then
     tasks="videomme,longvideobench_val_v,video_mmmu,lvbench,mmvu_val"
-    tasks="longvideobench_val_v,video_mmmu,lvbench,mmvu_val,mlvu_dev"
+    tasks="videomme,longvideobench_val_v,video_mmmu,lvbench"
     # tasks="mmvu_val"
     if [[ "$task_type" == *"all"* ]]; then
         # tasks="videomme,longvideobench_val_v,mlvu_dev,mlvu_test,egoschema_subset,lvbench,video_mmmu,mmvu_val,activitynettvg,charades,nextgqa" #mvbench
@@ -246,6 +252,18 @@ elif [[ "$conv_template" == *"vllm"* ]]; then
     if [[ "${_chunk_src}" == *"chunk_noresize"* ]]; then
         export PREDICTOR_RESIZE_KEPT_CHUNKS=0
     fi
+    if [[ "${_chunk_src}" == *"chunk_pass"* ]]; then
+        export PREDICTOR_TOPK_SELECTOR=pass
+        extra_name="${extra_name}_cpass"
+    fi
+    if [[ "${_chunk_src}" == *"chunk_bychunk"* ]]; then
+        export PREDICTOR_TOPK_UNIT=chunk
+        extra_name="${extra_name}_cbychunk"
+    fi
+    if [[ "${_chunk_src}" == *"chunk_pass"* ]] && [[ "${_chunk_src}" == *"chunk_bychunk"* ]]; then
+        echo "Error: chunk_pass and chunk_bychunk cannot be enabled together"
+        exit 1
+    fi
     _chunk_th=$(echo "${_chunk_src}" | grep -oP 'chunk_th\K[0-9]+\.?[0-9]*' | head -n1)
     _chunk_topk=$(echo "${_chunk_src}" | grep -oP 'chunk_topk\K[0-9]+' | head -n1)
     if [ -n "${_chunk_topk}" ] && [ -n "${_chunk_th}" ]; then
@@ -259,6 +277,10 @@ elif [[ "$conv_template" == *"vllm"* ]]; then
         export PREDICTOR_KEEP_CHUNK_THRESHOLD=${_chunk_th}
         extra_name="${extra_name}_cth${_chunk_th}"
     fi
+    if [ -n "${PREDICTOR_KEEP_TOPK_CHUNKS:-}" ] && [ "${PREDICTOR_TOPK_SELECTOR:-}" = "pass" ] && [ "${PREDICTOR_TOPK_UNIT:-}" = "chunk" ]; then
+        echo "Error: effective top-k config cannot combine PASS selector with chunk unit"
+        exit 1
+    fi
     if [ -n "${PREDICTOR_KEEP_TOPK_CHUNKS:-}" ]; then
         unset PREDICTOR_KEEP_CHUNK_THRESHOLD
         model_args="${model_args},predictor_keep_topk_chunks=${PREDICTOR_KEEP_TOPK_CHUNKS}"
@@ -268,6 +290,12 @@ elif [[ "$conv_template" == *"vllm"* ]]; then
     fi
     if [ -n "${PREDICTOR_RESIZE_KEPT_CHUNKS:-}" ]; then
         model_args="${model_args},predictor_resize_kept_chunks=${PREDICTOR_RESIZE_KEPT_CHUNKS}"
+    fi
+    if [ -n "${PREDICTOR_TOPK_SELECTOR:-}" ]; then
+        model_args="${model_args},predictor_topk_selector=${PREDICTOR_TOPK_SELECTOR}"
+    fi
+    if [ -n "${PREDICTOR_TOPK_UNIT:-}" ]; then
+        model_args="${model_args},predictor_topk_unit=${PREDICTOR_TOPK_UNIT}"
     fi
 
     if [[ "$method" == *"len"* ]]; then
@@ -310,7 +338,7 @@ elif [[ "$conv_template" == *"vllm"* ]]; then
             export max_inflight_per_gpu=8
             export MICRO_BATCH=8
             export MAX_QUEUE_PER_GPU=8
-            export WORKERS=2
+            export WORKERS=4
             export SCALE_PREPROCESS_RETRIES=8
             BATCH_SIZE=1
         elif [ "$max_num_frames" -ge 64 ]; then
@@ -756,7 +784,7 @@ fi
 echo "model: ${model}"
 echo "model_type: ${model_type}"
 echo "predictor_chunk_spec (arg12): ${predictor_chunk_spec:-}"
-echo "PREDICTOR_KEEP_CHUNK_THRESHOLD=${PREDICTOR_KEEP_CHUNK_THRESHOLD:-} PREDICTOR_KEEP_TOPK_CHUNKS=${PREDICTOR_KEEP_TOPK_CHUNKS:-} PREDICTOR_RESIZE_KEPT_CHUNKS=${PREDICTOR_RESIZE_KEPT_CHUNKS:-}"
+echo "PREDICTOR_KEEP_CHUNK_THRESHOLD=${PREDICTOR_KEEP_CHUNK_THRESHOLD:-} PREDICTOR_KEEP_TOPK_CHUNKS=${PREDICTOR_KEEP_TOPK_CHUNKS:-} PREDICTOR_RESIZE_KEPT_CHUNKS=${PREDICTOR_RESIZE_KEPT_CHUNKS:-} PREDICTOR_TOPK_SELECTOR=${PREDICTOR_TOPK_SELECTOR:-} PREDICTOR_TOPK_UNIT=${PREDICTOR_TOPK_UNIT:-}"
 echo "extra_kwargs: ${extra_kwargs}"
 echo "log_file: ${log_file}"
 echo "output_path: ${output_path}"

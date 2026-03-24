@@ -61,6 +61,24 @@ def _parse_optional_bool(value: Any, env_name: str, default: bool) -> bool:
         return value.lower() in ("1", "true", "yes", "y", "t")
     return bool(value)
 
+
+def _parse_optional_choice(value: Any, env_name: str, allowed: Tuple[str, ...]) -> Optional[str]:
+    if value is None:
+        value = os.getenv(env_name, "")
+    if value is None:
+        return None
+    value = str(value).strip().lower()
+    if not value:
+        return None
+    if value not in allowed:
+        raise ValueError(f"Invalid value for {env_name}: {value}. Allowed: {allowed}")
+    return value
+
+
+def _strip_custom_predictor_engine_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove predictor-only controls before forwarding kwargs into vLLM."""
+    return {key: value for key, value in dict(kwargs).items() if not str(key).startswith("predictor_")}
+
 def default_scale_entry() -> Dict[str, Any]:
     """Return a fresh default entry each time to avoid shared-mutation bugs."""
     return {"scale_means": 1.0, "scale_mask": None, "scales": None}
@@ -302,8 +320,11 @@ class VLLMGenerateCustom(VLLMChat):
         predictor_keep_chunk_threshold: Optional[float] = None,
         predictor_keep_topk_chunks: Optional[int] = None,
         predictor_resize_kept_chunks: Optional[bool] = None,
+        predictor_topk_selector: Optional[str] = None,
+        predictor_topk_unit: Optional[str] = None,
         **kwargs,
     ):
+        kwargs = _strip_custom_predictor_engine_kwargs(kwargs)
         self.predictor_path = os.getenv("PREDICTOR_PATH", None)
         self.enable_baseline_scale = env_true("ENABLE_BASELINE_SCALE")
         if log_visual_len is None:
@@ -326,6 +347,12 @@ class VLLMGenerateCustom(VLLMChat):
         )
         self.predictor_resize_kept_chunks = _parse_optional_bool(
             predictor_resize_kept_chunks, "PREDICTOR_RESIZE_KEPT_CHUNKS", default=True
+        )
+        self.predictor_topk_selector = _parse_optional_choice(
+            predictor_topk_selector, "PREDICTOR_TOPK_SELECTOR", ("greedy", "pass")
+        )
+        self.predictor_topk_unit = _parse_optional_choice(
+            predictor_topk_unit, "PREDICTOR_TOPK_UNIT", ("auto", "frame", "chunk")
         )
         if self.predictor_keep_chunk_threshold is not None and self.predictor_keep_topk_chunks is not None:
             raise ValueError(
@@ -431,6 +458,9 @@ class VLLMGenerateCustom(VLLMChat):
             nframes,
             **kwargs,
         )
+
+        if hasattr(self, "_vllm_client_init") and isinstance(self._vllm_client_init, dict):
+            self._vllm_client_init = _strip_custom_predictor_engine_kwargs(self._vllm_client_init)
 
         self.processor = AutoProcessor.from_pretrained(model)
         if self.chat_template is not None:
@@ -740,6 +770,7 @@ class VLLMGenerateCustom(VLLMChat):
             else:
                 init_kwargs = self._vllm_client_init
 
+            init_kwargs = _strip_custom_predictor_engine_kwargs(init_kwargs)
             self.client = LLM(**init_kwargs)
             print("[VLLMGenerateCustom] ✅ VLLM Client ready.")
         except Exception as e:
@@ -1237,6 +1268,8 @@ class VLLMGenerateCustom(VLLMChat):
                 keep_topk_chunks=self.predictor_keep_topk_chunks if self.predictor_path is not None else None,
                 keep_chunk_threshold=self.predictor_keep_chunk_threshold if self.predictor_path is not None else None,
                 resize_kept_chunks=self.predictor_resize_kept_chunks,
+                topk_selector=self.predictor_topk_selector,
+                topk_unit=self.predictor_topk_unit,
             )[0]
 
             updated_scales = mm_data.get("_adaptive_selected_scales", None)
