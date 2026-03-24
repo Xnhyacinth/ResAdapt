@@ -1709,7 +1709,7 @@ class RayPPOTrainer:
             predictor_output = self.predictor_wg.update_predictor(batch_scaled)
 
         batch.meta_info["metrics"] = predictor_output.meta_info["metrics"]
-        scale_multi_modal_data = self.config.predictor.get("scale_multi_modal_data", "scale")
+        scale_multi_modal_data = str(self.config.predictor.get("scale_multi_modal_data", "scale")).lower()
         if self.config.algorithm.get("use_filter_sid", False) and "ispred" in scale_multi_modal_data:
             if self.config.predictor.get("scale_n", 1) > 1:
                 scaled_log_probs = predictor_output.batch['predictor_log_probs'] # (Num_Unique_SIDs,)
@@ -1727,7 +1727,7 @@ class RayPPOTrainer:
             else:
                 batch.batch['predictor_log_probs'] = predictor_output.batch['predictor_log_probs']
 
-        if "awa" in scale_multi_modal_data:
+        if "aw" in scale_multi_modal_data:
             frame_metric_keys = [k for k in predictor_output.batch.keys() if k.startswith("frame_metrics:")]
             if frame_metric_keys:
                 frame_metrics = {}
