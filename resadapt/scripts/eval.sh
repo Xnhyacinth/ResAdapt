@@ -2,9 +2,9 @@ export HF_HUB_OFFLINE=True
 pip install httpx==0.23.3
 pip install chardet==5.2.0
 export PYTHONPATH=YOUR_WORKSPACE_PATH/ResAdapt:$PYTHONPATH
-export OPENAI_API_URL="https://gpt-i18n.byteintl.net/gpt/openapi/online/v2/crawl/openai/deployments/gpt_openapi"
-export OPENAI_API_KEY="dxMlgIJpXgkdou8z77OKt5rg4BQjwgJZ_GPT_AK"
-export MODEL_VERSION="gpt-5-2025-08-07"
+export OPENAI_API_URL="https://YOUR_OPENAI_API_URL"
+export OPENAI_API_KEY="YOUR_OPENAI_API_KEY"
+export MODEL_VERSION="YOUR_MODEL_VERSION"
 
 # export PYTORCH_ALLOC_CONF="max_split_size_mb:64,garbage_collection_threshold:0.8"
 #

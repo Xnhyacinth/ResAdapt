@@ -16,7 +16,7 @@ export HF_ENDPOINT=https://hf-mirror.com/
 export PYTHONPATH="YOUR_WORKSPACE_PATH/ResAdapt:YOUR_WORKSPACE_PATH/ResAdapt/resadapt:${PYTHONPATH:-}"
 export PYTORCH_KERNEL_CACHE_PATH="YOUR_WORKSPACE_PATH/.cache/torch/kernels"
 export RAY_memory_usage_threshold=0.98
-export TK_HOST=https://ml.byteintl.net
+export TK_HOST="https://YOUR_TK_HOST"
 
 ray_env_args=(
     "+ray_kwargs.ray_init.runtime_env.env_vars.HF_HUB_OFFLINE='${HF_HUB_OFFLINE}'"
