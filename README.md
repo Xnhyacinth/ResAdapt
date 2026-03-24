@@ -1,6 +1,15 @@
 # ResAdapt: Resource-Aware Adaptation for Large Vision-Language Models
 
-This is the official repository for **ResAdapt**, a novel framework designed to adaptively allocate resources (such as frames or tokens) for Vision-Language Models (VLMs) and Video-LMs. By employing a lightweight **allocator**, ResAdapt dynamically determines the optimal resource allocation strategy to balance performance and computational efficiency.
+**ResAdapt** is an **Input-side adaptation** framework designed to adaptively allocate visual budgets (such as spatial resolution or tokens) for Vision-Language Models (VLMs) and Video-LMs *before* encoding.
+
+By coupling a lightweight **Allocator** with an unchanged MLLM backbone, ResAdapt dynamically determines the optimal resource allocation strategy to balance performance and computational efficiency. It converts sparse rollout feedback into a stable learning signal using **Cost-Aware Policy Optimization (CAPO)**.
+
+## Highlights
+- **Input-side Adaptation:** Reallocates visual budget before encoding, preserving the backbone's native token interface and compatibility with optimized inference engines (e.g., FlashAttention, vLLM).
+- **Cost-Aware Policy Optimization (CAPO):** Formulates visual allocation as a contextual bandit, training the Allocator to optimize the efficiency-accuracy Pareto frontier.
+- **Extreme Efficiency:** Matches or surpasses uncompressed baselines while compressing over **90%** of visual tokens.
+- **Long-context Video Reasoning:** Supports up to **16× more frames** at the same visual budget, delivering over 15% performance gain on reasoning-heavy benchmarks.
+- **Active Perception:** The learned policy exhibits open-loop active perception, concentrating visual budget on information-dense content without explicit saliency supervision.
 
 ## Quick Start
 
@@ -46,7 +55,7 @@ nohup bash resadapt/scripts/eval.sh Qwen/Qwen2.5-VL-7B-Instruct vllm_generate vi
 ## Repository Structure
 
 - `resadapt/allocator/`: Contains the definitions, configurations, and initialization scripts for the lightweight resource allocator.
-- `resadapt/reward_fn/`: Includes reward functions and advantage computations used during RL training.
+- `resadapt/reward_fn/`: Includes reward functions and advantage computations used during RL training (e.g., CAPO and temporal similarity regularizers).
 - `resadapt/scripts/`: Main bash scripts for launching training (`main.sh`) and evaluation (`eval.sh`).
 - `resadapt/eval/`: Offline evaluation scripts and utilities.
 - `resadapt/verl_patches/`: Custom patches for the `verl` framework, including data parallel actors and FSDP workers.
