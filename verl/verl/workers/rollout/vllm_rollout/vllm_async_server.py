@@ -78,7 +78,7 @@ if os.environ.get("VLLM_MROPE_PATCH", False):
     print("🚀 [Patching] Applying custom VLLM Qwen2.5-VL MROPE logic...")
     import vllm
     from vllm.model_executor.models import qwen2_5_vl
-    from visionthink.predictor.vllm_patch import get_mrope_input_positions
+    from resadapt.allocator.vllm_patch import get_mrope_input_positions
     # , iter_mm_grid_thw
 
     # vllm.model_executor.models.qwen2_5_vl.Qwen2_5_VLForConditionalGeneration.get_mrope_input_positions = (

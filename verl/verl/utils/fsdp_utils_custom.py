@@ -129,17 +129,17 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
                 transformer_cls_to_wrap.add(transformer_cls)
 
         ###
-        # from visionthink.adaptive.modeling_qwenvl import RegressionHeadPredictor
-        # from visionthink.adaptive.AZNet import PredictorDecoderLayer, ProjectorBlock
+        # from resadapt.utils.modeling_qwenvl import RegressionHeadPredictor
+        # from resadapt.utils.AZNet import PredictorDecoderLayer, ProjectorBlock
         # transformer_cls_to_wrap.update([PredictorDecoderLayer, ProjectorBlock])
         
-        # from visionthink.predictor.AZNet import PredictorDecoderLayer
-        # from visionthink.predictor.AZNetv2 import SmallTextEncoder
+        # from resadapt.allocator.AZNet import PredictorDecoderLayer
+        # from resadapt.allocator.AZNetv2 import SmallTextEncoder
         # transformer_cls_to_wrap.update([PredictorDecoderLayer, SmallTextEncoder])
         
         # # Add V2 Predictor modules
         # try:
-        #     from visionthink.predictor.DifferentiableImportancePredictor import (
+        #     from resadapt.allocator.importance_predictor_v1 import (
         #         CrossModalMatcher,
         #         DualPathEncoder,
         #         # FrameInformationEncoder,
@@ -155,7 +155,7 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
         #     # V2 predictor might not be available or used
         #     pass
 
-        # from visionthink.predictor.AZNetv4 import CrossAttentionStack, FrameTemporalEncoder, SpatialBlockV2, TemporalBlockV2
+        # from resadapt.allocator.AZNetv4 import CrossAttentionStack, FrameTemporalEncoder, SpatialBlockV2, TemporalBlockV2
         # transformer_cls_to_wrap.update([CrossAttentionStack, FrameTemporalEncoder, SpatialBlockV2, TemporalBlockV2])
         # print(transformer_cls_to_wrap)
 

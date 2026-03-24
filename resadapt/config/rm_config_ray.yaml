@@ -1,0 +1,61 @@
+hydra:
+  searchpath:
+    - file://verl_ori/verl/trainer/config
+    - file://YOUR_WORKSPACE_PATH/ResAdapt/verl_ori/verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  # - ppo_megatron_trainer
+  - _self_
+
+data:
+  acc_reward_weight: 1.0
+  format_reward_weight: 1.0
+  tool_call_penalty: 0.1
+  direct_answer_penalty: 0.0
+  gpt_extract_answer: False
+  mask_blank: False
+  tool_call: False
+  supervise_tool_label: False
+  strict_tool_call_penalty: False
+  extract_answer_tags: split
+  # system_prompt: False
+  # max_pixels: 4194304
+  # min_pixels: 262144
+  # use_tgt_size: False
+  # acc_reward_weight: 1.0
+  # format_reward_weight: 1.0
+  # tool_call_penalty: 0.1
+  # direct_answer_penalty: 0.0
+  # supervise_tool_label: False
+  # strict_tool_call_penalty: False
+  # extract_answer_tags: split
+  # prompt_type: "vanilla"
+  # general_qa_reward_fn: "general_qa_gpt"
+  # val_general_qa_reward_fn: null
+  # gpt_threads: 100
+
+actor_rollout_ref:
+  # actor:
+    # scale_multi_modal_data: False
+    # predictor_lr: 1e-5
+    # scale_n: 1
+  model:
+    min_scale: 0.25
+    max_scale: 3.0
+    scale_multi_modal_data: null
+    predictor_lr: 1e-5
+    scale_n: 1
+# actor_rollout_ref:
+#   actor:
+#     fsdp_config:
+#       min_scale: 0.25
+#       max_scale: 3.0
+
+trainer:
+  rejection_sample: False
+  rejection_sample_multiplier: 1 # Multiple the training batch size by this factor to account for rejection sampling reduction.
+  soft_tool_call_penalty_ratio: 0.0
+  soft_tool_call_filter: False
+
+  # use_3drope: True

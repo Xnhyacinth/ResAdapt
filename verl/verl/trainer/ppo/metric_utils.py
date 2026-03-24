@@ -224,7 +224,7 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True, config = Non
 
     ###
     if "actions" in batch.batch:
-        from visionthink.adaptive.utils import compute_scales_and_sample_means_cpu
+        from resadapt.utils.utils import compute_scales_and_sample_means_cpu
         max_scale = config.max_scale
         min_scale = config.min_scale
         use_discrete_action = config.use_discrete_action

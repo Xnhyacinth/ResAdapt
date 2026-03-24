@@ -52,7 +52,7 @@ class SingleTurnAgentLoop(AgentLoopBase):
 
         ###
         if videos is not None and self.dataset_config.get("video2image", False):
-            from visionthink.adaptive.utils import video2images
+            from resadapt.utils.utils import video2images
             
             messages, images = video2images(messages, videos, images)
             videos = None
@@ -61,14 +61,14 @@ class SingleTurnAgentLoop(AgentLoopBase):
             multi_modal_data.pop("videos", None)
 
         elif videos is not None and self.dataset_config.get("video2list", False):
-            from visionthink.adaptive.utils import video2list
+            from resadapt.utils.utils import video2list
 
             messages, videos = video2list(messages, videos, self.processor.video_processor.temporal_patch_size)
             
             multi_modal_data["videos"] = videos
 
         if "scales" in kwargs:
-            from visionthink.adaptive.utils import apply_adaptive_scaling
+            from resadapt.utils.utils import apply_adaptive_scaling
 
             patch_size = self.processor.image_processor.patch_size
             image_factor = self.processor.video_processor.merge_size * patch_size

@@ -285,7 +285,7 @@ class AgentLoopBase(ABC):
 
             ###
             if video_metadatas is not None and "video_timestamps" in video_metadatas[0].keys():
-                from visionthink.adaptive.utils import maybe_expand_video_prompt
+                from resadapt.utils.utils import maybe_expand_video_prompt
                 temporal_patch_size = self.processor.video_processor.temporal_patch_size
                 raw_prompt = maybe_expand_video_prompt(
                     raw_prompt=raw_prompt,

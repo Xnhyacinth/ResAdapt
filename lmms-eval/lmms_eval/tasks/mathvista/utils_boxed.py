@@ -5,7 +5,7 @@ from lmms_eval.tasks.mathvista import utils as _utils
 
 def mathvista_doc_to_text(doc, lmms_eval_specific_kwargs=None):
     text = _utils.mathvista_doc_to_text(doc, lmms_eval_specific_kwargs)
-    return f"{text}\nPut your final answer in \\boxed{}."
+    return f"{text}\nPut your final answer in \\boxed{{}}."
 
 
 def mathvista_process_results(doc, results):

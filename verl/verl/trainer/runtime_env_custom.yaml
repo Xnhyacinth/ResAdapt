@@ -1,5 +1,5 @@
 working_dir: ./
-excludes: ["/.git/", "/mnt/bn/jiangzhongtao/users/liaohuanxuan/visionthink/verl/.git/", "/mnt/bn/jiangzhongtao/users/liaohuanxuan/visionthink/verl_ori/.git/"]
+excludes: ["/.git/", "YOUR_WORKSPACE_PATH/ResAdapt/verl/.git/", "YOUR_WORKSPACE_PATH/ResAdapt/verl_ori/.git/"]
 env_vars:
   TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
   CUDA_DEVICE_MAX_CONNECTIONS: "1"

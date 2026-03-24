@@ -268,7 +268,7 @@ MICRO_BATCH = int(os.getenv("MICRO_BATCH", "16"))
 max_inflight_per_gpu = int(os.getenv("max_inflight_per_gpu", "4"))
 
 
-from visionthink.adaptive.utils import (
+from resadapt.utils.utils import (
     expand_image_prompt,
     apply_adaptive_scaling,
     maybe_expand_video_prompt,
@@ -281,7 +281,7 @@ if env_true("VLLM_MROPE_PATCH"):
     print("🚀 [Patching] Applying custom VLLM Qwen2.5-VL MROPE logic...")
     import vllm
     from vllm.model_executor.models import qwen2_5_vl
-    from visionthink.predictor.vllm_patch import get_mrope_input_positions
+    from resadapt.allocator.vllm_patch import get_mrope_input_positions
     # , iter_mm_grid_thw
 
     # vllm.model_executor.models.qwen2_5_vl.Qwen2_5_VLForConditionalGeneration.get_mrope_input_positions = (
@@ -420,7 +420,7 @@ class VLLMGenerateCustom(VLLMChat):
             # Check GPU availability before starting pool
             if self._check_gpu_available():
                 try:
-                    from visionthink.predictor.multi_model_limit_async import MultiGPUInferPool
+                    from resadapt.eval.multi_model_limit_async import MultiGPUInferPool
                     print(
                         "[VLLMGenerateCustom] [Rank 0] Predictor pool config: "
                         f"num_gpus={self._pool_kwargs.get('num_gpus')} "
@@ -785,7 +785,7 @@ class VLLMGenerateCustom(VLLMChat):
 
         print(f"[VLLMGenerateCustom] 🚀 Initializing Predictor Pool (Model: {self.predictor_path})...")
         try:
-            from visionthink.predictor.multi_model_limit_async import MultiGPUInferPool
+            from resadapt.eval.multi_model_limit_async import MultiGPUInferPool
             self.pool = MultiGPUInferPool(**self._pool_kwargs)
             self.pool.start()
             print("[VLLMGenerateCustom] ✅ Predictor Pool ready.")

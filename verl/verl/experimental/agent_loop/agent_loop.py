@@ -285,12 +285,12 @@ class AgentLoopBase(ABC):
             ###
             if video_metadatas is not None and "video_timestamps" in video_metadatas[0].keys():
                 if "Qwen3VL" in type(self.processor).__name__:
-                    from visionthink.adaptive.utils import expand_video_prompt_blocks
+                    from resadapt.utils.utils import expand_video_prompt_blocks
                     temporal_patch_size = self.processor.video_processor.temporal_patch_size
                     raw_prompt = expand_video_prompt_blocks(raw_prompt, videos)
 
                 else:
-                    from visionthink.adaptive.utils import maybe_expand_video_prompt
+                    from resadapt.utils.utils import maybe_expand_video_prompt
                     temporal_patch_size = self.processor.video_processor.temporal_patch_size
                     raw_prompt = maybe_expand_video_prompt(
                         raw_prompt=raw_prompt,

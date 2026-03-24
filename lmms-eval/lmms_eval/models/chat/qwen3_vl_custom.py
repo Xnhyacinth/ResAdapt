@@ -91,9 +91,9 @@ class Qwen3_VL_Custom(Qwen3_VLSimpleCustom):
                 )
             except Exception as e:
                 eval_logger.warning(
-                    f"process_vision_info failed, fallback to visionthink.predictor.vision_process: {e}"
+                    f"process_vision_info failed, fallback to resadapt.allocator.vision_process: {e}"
                 )
-                from visionthink.predictor.vision_process import process_vision_info as process_vision_info_local
+                from resadapt.allocator.vision_process import process_vision_info as process_vision_info_local
 
                 image_inputs, video_inputs, video_kwargs_qwen = process_vision_info_local(
                     batched_messages,

@@ -1,5 +1,5 @@
 #!/bin/bash
-export PYTHONPATH=/mnt/bn/jiangzhongtao/users/liaohuanxuan/visionthink:$PYTHONPATH
+export PYTHONPATH=YOUR_WORKSPACE_PATH/ResAdapt:$PYTHONPATH
 
 # ================= Configuration =================
 # Check arguments
@@ -22,8 +22,8 @@ max_num_frames=${7:-"0"}
 METHOD=${8:-"0"}
 
 # Paths and Constants
-CONDA_SH_PATH="/mnt/bn/jiangzhongtao/users/liaohuanxuan/conda/etc/profile.d/conda.sh"
-EVAL_SCRIPT="bash visionthink/scripts/eval.sh"
+CONDA_SH_PATH="YOUR_WORKSPACE_PATH/conda/etc/profile.d/conda.sh"
+EVAL_SCRIPT="bash resadapt/scripts/eval.sh"
 EVAL_MODEL="Qwen/Qwen2-VL-7B-Instruct" 
 EVAL_TAG=("0" "0" "0" "0")
 SCAN_INTERVAL=300 
@@ -37,8 +37,8 @@ fi
 source "$CONDA_SH_PATH"
 
 # Check Eval Script
-if [ ! -f "visionthink/scripts/eval.sh" ]; then
-    echo "Error: visionthink/scripts/eval.sh not found in current directory"
+if [ ! -f "resadapt/scripts/eval.sh" ]; then
+    echo "Error: resadapt/scripts/eval.sh not found in current directory"
     exit 1
 fi
 

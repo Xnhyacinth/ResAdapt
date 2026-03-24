@@ -145,7 +145,7 @@ def _build_vllm_sampling_params(params: Dict[str, Any]):
                     msg = str(e2)
             return SamplingParams(**filtered)
 
-from visionthink.adaptive.utils import (
+from resadapt.utils.utils import (
     expand_image_prompt,
     apply_adaptive_scaling,
     maybe_expand_video_prompt,
@@ -157,7 +157,7 @@ if env_true("VLLM_MROPE_PATCH"):
     print("🚀 [Patching] Applying custom VLLM Qwen2.5-VL MROPE logic...")
     import vllm
     from vllm.model_executor.models import qwen2_5_vl
-    from visionthink.predictor.vllm_patch import get_mrope_input_positions
+    from resadapt.allocator.vllm_patch import get_mrope_input_positions
     # , iter_mm_grid_thw
 
     # vllm.model_executor.models.qwen2_5_vl.Qwen2_5_VLForConditionalGeneration.get_mrope_input_positions = (
@@ -290,7 +290,7 @@ class VLLMGenerateAutoThink(VLLMChat):
             print(f"[VLLMGenerateAutoThink] [Rank 0] Found predictor at {self.predictor_path}")
             if self._check_gpu_available():
                 try:
-                    from visionthink.predictor.multi_model_limit_async import MultiGPUInferPool
+                    from resadapt.eval.multi_model_limit_async import MultiGPUInferPool
                     self.pool = MultiGPUInferPool(**self._pool_kwargs)
                     self.pool.start()
                     print("[VLLMGenerateAutoThink] [Rank 0] Predictor pool started successfully")
@@ -677,7 +677,7 @@ class VLLMGenerateAutoThink(VLLMChat):
         if self.predictor_path is None and not self.enable_baseline_scale:
             return
         try:
-            from visionthink.predictor.multi_model_limit_async import MultiGPUInferPool
+            from resadapt.eval.multi_model_limit_async import MultiGPUInferPool
             self.pool = MultiGPUInferPool(**self._pool_kwargs)
             self.pool.start()
         except Exception:

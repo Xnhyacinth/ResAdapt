@@ -35,7 +35,7 @@ from verl.utils.import_utils import load_extern_object
 
 ###
 from qwen_vl_utils import process_vision_info
-from visionthink.adaptive.utils import expand_video_prompt, expand_image_prompt, tensor_to_tensor_list, tensor_to_temporal_stack_list, split_video_metadata
+from resadapt.utils.utils import expand_video_prompt, expand_image_prompt, tensor_to_tensor_list, tensor_to_temporal_stack_list, split_video_metadata
 ###
 
 logger = logging.getLogger(__name__)

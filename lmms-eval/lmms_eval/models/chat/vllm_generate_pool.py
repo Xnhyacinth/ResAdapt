@@ -27,7 +27,7 @@ from PIL import Image
 from io import BytesIO
 import base64
 import gc
-from visionthink.adaptive.utils import tensor_to_pil_list, expand_video_prompt, expand_image_prompt, deserialize_base64_to_tensor
+from resadapt.utils.utils import tensor_to_pil_list, expand_video_prompt, expand_image_prompt, deserialize_base64_to_tensor
 ###
 
 @register_model("vllm_generate_pool")
@@ -73,7 +73,7 @@ class VLLMGeneratePool(VLLMChat):
             print(f"[VLLMGenerateCustom] Found predictor at {self.predictor_path}, loading... and patching...")
             print(f"[VLLMGenerateCustom] Found enable_baseline_scale: {enable_baseline_scale}")
 
-            from visionthink.predictor.multi_model_limit import MultiGPUInferPool
+            from resadapt.allocator.multi_model_limit import MultiGPUInferPool
 
             self.pool = MultiGPUInferPool(
                 model_path=self.predictor_path,
@@ -88,16 +88,16 @@ class VLLMGeneratePool(VLLMChat):
             self.pool.start()
             
         #     # os.environ["PREDICTOR_PATH"] = predictor_path
-        #     from visionthink.adaptive.utils import _apply_hf_processor_main, __init__
+        #     from resadapt.utils.utils import _apply_hf_processor_main, __init__
         #     import vllm.model_executor.models.qwen2_5_vl
         #     from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VLMultiModalProcessor
             
             # Qwen2_5_VLMultiModalProcessor.__init__ = __init__
             # vllm.model_executor.models.qwen2_5_vl.Qwen2_5_VLMultiModalProcessor._apply_hf_processor_main = _apply_hf_processor_main
 
-            # import visionthink.predictor.vllm_patch
+            # import resadapt.allocator.vllm_patch
             # from transformers import AutoConfig, AutoModel
-            # from visionthink.predictor.modeling_predictor import PredictorForConditionalGeneration
+            # from resadapt.allocator.modeling_predictor import PredictorForConditionalGeneration
             
             # # config = AutoConfig.from_pretrained(predictor_path, trust_remote_code=True)
             # self.predictor = PredictorForConditionalGeneration.from_pretrained(
