@@ -8,7 +8,7 @@ FRAME_METRICS_PREFIX = "frame_metrics:"
 
 
 def encode_frame_metrics(frame_metrics: Mapping[str, torch.Tensor] | None) -> dict[str, torch.Tensor]:
-    if not frame_metrics:
+    if frame_metrics is None or len(frame_metrics) == 0:
         return {}
     return {
         f"{FRAME_METRICS_PREFIX}{key}": value
@@ -18,7 +18,7 @@ def encode_frame_metrics(frame_metrics: Mapping[str, torch.Tensor] | None) -> di
 
 
 def decode_frame_metrics(batch_tensors: Mapping[str, object] | None) -> dict[str, torch.Tensor]:
-    if not batch_tensors:
+    if batch_tensors is None or len(batch_tensors) == 0:
         return {}
     return {
         metric_name: value
