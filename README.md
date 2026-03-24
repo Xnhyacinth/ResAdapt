@@ -19,13 +19,13 @@ The training process involves three main steps:
 3. Launching the training.
 
 ### 1. Save the Allocator
-Before starting the RL training, you need to initialize and save the allocator weights. Run the modeling script corresponding to your allocator version. For example, using the `smol_v3` allocator:
+Before starting the RL training, you need to initialize and save the allocator weights. Run the modeling script corresponding to your allocator version. For example, using the `smol_v2` allocator:
 
 ```bash
 cd resadapt/allocator
-python3 modeling_allocator_smol_v3.py
+python3 modeling_allocator_smol_v2.py
 ```
-This will save the initialized allocator model to your configured path (e.g., `YOUR_WORKSPACE_PATH/models/allocator_smolv3`). 
+This will save the initialized allocator model to your configured path (e.g., `YOUR_WORKSPACE_PATH/models/allocator_smolv2`). 
 You can adjust the configuration in `smol_config.py` if necessary.
 
 ### 2. Configure the Main Script
@@ -34,7 +34,7 @@ Once the allocator is saved, update the allocator path in the main training scri
 Ensure that `ALLOCATOR_PATH` matches the directory where you saved the model in Step 1.
 For example:
 ```bash
-ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocator_smolv3
+ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocator_smolv2
 ```
 
 ### 3. Run Training
@@ -42,8 +42,8 @@ Use `run.sh` to configure the training parameters and launch the job. The `run.s
 
 Example execution from the repository root:
 ```bash
-# Example: 7B model with smol_v4 allocator, FSDP2, 4 nodes
-NNODES=4 nohup bash resadapt/scripts/main.sh 7B mix_pt_asym_scale_smolv4_sim_ccen_filter_frozen_newtie_acc_cost_enc0.25_cen0.4_nframes128_video_mrope 8 8 fsdp2 1.8 1 16 2e-5 0 > logs_run/train_7b.log 2>&1 &
+# Example: 7B model with smol_v2 allocator, FSDP2, 4 nodes
+NNODES=4 nohup bash resadapt/scripts/main.sh 7B mix_pt_asym_scale_smolv2_sim_ccen_filter_frozen_newtie_acc_cost_enc0.25_cen0.4_nframes128_video_mrope 8 8 fsdp2 1.8 1 16 2e-5 0 > logs_run/train_7b.log 2>&1 &
 ```
 
 ### Evaluation

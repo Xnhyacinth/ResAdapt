@@ -606,7 +606,7 @@ if __name__ == "__main__":
         llm_hidden_size=768,
         out_hidden_size=576,
         output_dim=1024,
-        self_depth=2,
+        self_depth=1,
         cross_depth=1,
         dim_head=64,
         num_heads=16,
@@ -624,7 +624,7 @@ if __name__ == "__main__":
         vlp_mode="mlp",
         regression_head_mode="mlp",
         use_differentiable_importance=False,
-        frame_temporal_depth=2,
+        frame_temporal_depth=1,
         use_text_conditioned_spatial=False,
         enable_rope_cache=True,
         dropout=0.0,
@@ -657,9 +657,9 @@ if __name__ == "__main__":
         sim_gamma=0.05,
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # model = SmolAllocatorForConditionalGeneration(config).to(device)
-    logistic_normal_config = SmolAllocatorConfig(**{**config.to_dict(), "continuous_dist": "logistic_normal"})
-    model = SmolAllocatorForConditionalGeneration(logistic_normal_config).to(device)
+    model = SmolAllocatorForConditionalGeneration(config).to(device)
+    # logistic_normal_config = SmolAllocatorConfig(**{**config.to_dict(), "continuous_dist": "logistic_normal"})
+    # model = SmolAllocatorForConditionalGeneration(logistic_normal_config).to(device)
     # "YOUR_WORKSPACE_PATH/models/allocatorv2_sft",
     # model = SmolAllocatorForConditionalGeneration.from_pretrained(
     #     "YOUR_WORKSPACE_PATH/models/allocator_smol_init",

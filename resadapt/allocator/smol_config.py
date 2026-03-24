@@ -64,6 +64,7 @@ class SmolAllocatorConfig(PretrainedConfig):
         gate_k_ratio: float = 0.25,
         gate_temperature: float = 1.0,
         gate_query_scale: float = 1.0,
+        allocator_arch: str = "framewise_v3",
         continuous_dist: str = "beta",
         continuous_eval_quantile: float = 0.5,
         beta_param_scale: float = 1.0,
@@ -144,6 +145,7 @@ class SmolAllocatorConfig(PretrainedConfig):
         self.gate_k_ratio = gate_k_ratio
         self.gate_temperature = gate_temperature
         self.gate_query_scale = gate_query_scale
+        self.allocator_arch = allocator_arch
         self.continuous_dist = continuous_dist
         self.continuous_eval_quantile = continuous_eval_quantile
         self.beta_param_scale = beta_param_scale
@@ -164,6 +166,7 @@ class SmolAllocatorConfig(PretrainedConfig):
 
     def get(self, key, default=None):
         return getattr(self, key, default)
+
 
 
 __all__ = ["SmolAllocatorConfig"]
