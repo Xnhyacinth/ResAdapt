@@ -11,6 +11,17 @@ By coupling a lightweight **Allocator** with an unchanged MLLM backbone, ResAdap
 - **Long-context Video Reasoning:** Supports up to **16× more frames** at the same visual budget, delivering over 15% performance gain on reasoning-heavy benchmarks.
 - **Active Perception:** The learned policy exhibits open-loop active perception, concentrating visual budget on information-dense content without explicit saliency supervision.
 
+## Installation
+
+To set up the environment, run the following commands:
+
+```bash
+pip install -e ".[vllm]"
+pip install "transformers<5.0"
+pip install flash-attn --no-build-isolation
+pip install rouge_score sympy
+```
+
 ## Quick Start
 
 The training process involves three main steps: 
