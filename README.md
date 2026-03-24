@@ -1,4 +1,4 @@
-# ResAdapt: Resource-Aware Adaptation for Large Vision-Language Models
+# ResAdapt: Efficient Multimodal Reasoning via Adaptive Resolution
 
 **ResAdapt** is an **Input-side adaptation** framework designed to adaptively allocate visual budgets (such as spatial resolution or tokens) for Vision-Language Models (VLMs) and Video-LMs *before* encoding.
 
