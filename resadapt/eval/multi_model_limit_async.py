@@ -39,7 +39,7 @@ def _gpu_worker_main(
     GPU worker process.
 
     - Uses CUDA_VISIBLE_DEVICES=gpu_id (1 GPU per proc).
-    - Loads predictor once.
+    - Loads allocator once.
     - Supports micro-batching + recursive split on OOM.
     - Always returns result via out_q: (req_id, gpu_id, payload_dict)
     """
@@ -57,7 +57,7 @@ def _gpu_worker_main(
         pass
 
     try:
-        # from resadapt.allocator.modeling_predictor import PredictorForConditionalGeneration
+        # from resadapt.allocator.modeling_allocator import AllocatorForConditionalGeneration
         from  transformers import AutoModel, AutoConfig
         from resadapt.utils.utils import compute_scales_and_sample_means_cpu, _to_cpu_deep
     except Exception as e:
@@ -83,16 +83,16 @@ def _gpu_worker_main(
                 config.min_scale = float(min_scale_override)
             except Exception:
                 pass
-        predictor = AutoModel.from_pretrained(
+        allocator = AutoModel.from_pretrained(
             model_path, config=config, dtype="auto", device_map="auto", trust_remote_code=True
         )
-        predictor.eval()
+        allocator.eval()
     except Exception as e:
         print(f"[worker gpu={gpu_id}] FATAL model load error: {repr(e)}", file=sys.stderr, flush=True)
         return
 
-    max_scale = float(getattr(predictor.config, "max_scale", 2.0))
-    min_scale = float(getattr(predictor.config, "min_scale", 0.25))
+    max_scale = float(getattr(allocator.config, "max_scale", 2.0))
+    min_scale = float(getattr(allocator.config, "min_scale", 0.25))
     if max_scale_override is not None:
         try:
             max_scale = float(max_scale_override)
@@ -103,8 +103,8 @@ def _gpu_worker_main(
             min_scale = float(min_scale_override)
         except Exception:
             pass
-    use_discrete_action = bool(getattr(predictor.config, "use_discrete_action", False))
-    discrete_step = float(getattr(predictor.config, "discrete_step", 0.25))
+    use_discrete_action = bool(getattr(allocator.config, "use_discrete_action", False))
+    discrete_step = float(getattr(allocator.config, "discrete_step", 0.25))
 
     def _extract_echoes(payload: Dict[str, Any]) -> Tuple[Optional[Any], Optional[Any]]:
         try:
@@ -144,7 +144,7 @@ def _gpu_worker_main(
                 return_mm = True
 
         with torch.inference_mode():
-            out = predictor(messages=batch_messages, eval_mode=eval_mode, return_mm_data=return_mm)
+            out = allocator(messages=batch_messages, eval_mode=eval_mode, return_mm_data=return_mm)
 
         scales_cpu, scale_mask_cpu, sample_means_cpu = compute_scales_and_sample_means_cpu(
             out,
@@ -158,7 +158,7 @@ def _gpu_worker_main(
         if return_mm:
             mm_list = out.get("multi_modal_data", None)
             if not isinstance(mm_list, list) or len(mm_list) != len(items):
-                raise RuntimeError(f"Bad predictor multi_modal_data len={None if mm_list is None else len(mm_list)} expected={len(items)}")
+                raise RuntimeError(f"Bad allocator multi_modal_data len={None if mm_list is None else len(mm_list)} expected={len(items)}")
             mm_cpu = [_to_cpu_deep(m) for m in mm_list]
 
         del out

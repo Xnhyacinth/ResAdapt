@@ -263,14 +263,14 @@ class EvaluationTracker:
                 file_results_samples = path.joinpath(f"{self.date_id}_samples_{task_name}.jsonl")
                 file_results_scales = path.joinpath(f"{self.date_id}_scales_{task_name}.jsonl")
                 file_results_len = path.joinpath(f"{self.date_id}_len_{task_name}.jsonl")
-                def _sample_has_predictor_scale(sample):
-                    value = sample.get("has_predictor_scale", None)
+                def _sample_has_allocator_scale(sample):
+                    value = sample.get("has_allocator_scale", None)
                     if isinstance(value, (list, tuple)):
                         return any(bool(v) for v in value)
                     return bool(value)
 
-                has_predictor_scale = any(_sample_has_predictor_scale(sample) for sample in samples)
-                sample_entries = self._collect_sample_scales(samples) if has_predictor_scale else []
+                has_allocator_scale = any(_sample_has_allocator_scale(sample) for sample in samples)
+                sample_entries = self._collect_sample_scales(samples) if has_allocator_scale else []
                 len_entries = self._collect_sample_visual_lens(samples)
 
                 for sample in samples:
@@ -295,7 +295,7 @@ class EvaluationTracker:
                         )
                         + "\n"
                     )
-                    if has_predictor_scale:
+                    if has_allocator_scale:
                         with open(file_results_scales, "a", encoding="utf-8") as f:
                             f.write(scales_dump)
 

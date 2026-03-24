@@ -5,7 +5,7 @@ fewshot_config:
   sampler: first_n
   samples:
   - question: 'In the construction of a multiple regression equation for purposes of
-      prediction, the optimal combination of measures is one in which the predictors
+      prediction, the optimal combination of measures is one in which the allocators
 
       (A) are uncorrelated with each other but are moderately correlated with the
       criterion (B) have low correlations with each other and low correlations with
@@ -14,7 +14,7 @@ fewshot_config:
       are moderately correlated with each other'
     target: Let's think step by step. We refer to Wikipedia articles on psychology
       for help. The basis of multiple regression is to assess the relationship between
-      one continuous variable and a set of independent variables. So the predictors
+      one continuous variable and a set of independent variables. So the allocators
       should be uncorrelated with each other but are moderately correlated with the
       criterion. The answer is (A).
   - question: 'There are three ways to measure the Central Tendency: the Mean, the Median

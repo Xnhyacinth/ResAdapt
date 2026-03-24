@@ -150,8 +150,8 @@ def get_vl_model_embed_tokens(vl_model_instance):
         return vl_model_instance.language_model.embed_tokens
     if hasattr(vl_model_instance, "embed_tokens"):
         return vl_model_instance.embed_tokens
-    if hasattr(vl_model_instance, "predictor") and hasattr(vl_model_instance.predictor, "embed_tokens"):
-        return vl_model_instance.predictor.embed_tokens
+    if hasattr(vl_model_instance, "allocator") and hasattr(vl_model_instance.allocator, "embed_tokens"):
+        return vl_model_instance.allocator.embed_tokens
     return None
 ###
 
@@ -1756,7 +1756,7 @@ class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
         return True
 
 
-class PredictorWorker(Worker, DistProfilerExtension):
+class AllocatorWorker(Worker, DistProfilerExtension):
     """
     This worker can be instantiated as a standalone actor or a standalone rollout or a standalone reference policy
     or a hybrid engine based on the config.rollout
@@ -1803,10 +1803,10 @@ class PredictorWorker(Worker, DistProfilerExtension):
         if self.ulysses_device_mesh is not None:
             is_collect = self.ulysses_device_mesh["sp"].get_local_rank() == 0
             self._register_dispatch_collect_info(
-                "predictor", dp_rank=self.ulysses_device_mesh["dp"].get_local_rank(), is_collect=is_collect
+                "allocator", dp_rank=self.ulysses_device_mesh["dp"].get_local_rank(), is_collect=is_collect
             )
         else:
-            self._register_dispatch_collect_info("predictor", dp_rank=self.rank, is_collect=True)
+            self._register_dispatch_collect_info("allocator", dp_rank=self.rank, is_collect=True)
         ###
         
         self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
@@ -1815,9 +1815,9 @@ class PredictorWorker(Worker, DistProfilerExtension):
 
         self.role = role
         ###
-        assert self.role in ["actor", "rollout", "ref", "actor_rollout", "actor_rollout_ref", "predictor"]
+        assert self.role in ["actor", "rollout", "ref", "actor_rollout", "actor_rollout_ref", "allocator"]
 
-        self._is_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref", "predictor"]
+        self._is_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref", "allocator"]
         self._is_rollout = self.role in ["rollout", "actor_rollout", "actor_rollout_ref"]
         self._is_ref = self.role in ["ref", "actor_rollout_ref"]
         self.use_orig_params = self.config.actor.fsdp_config.get("use_orig_params", False)
@@ -2175,18 +2175,18 @@ class PredictorWorker(Worker, DistProfilerExtension):
         if "frozen" in scale_multi_modal_data:
             self.use_orig_params = True
             actor_module.requires_grad_(False)
-            actor_module.predictor.requires_grad_(True)
+            actor_module.allocator.requires_grad_(True)
             embed_tokens = get_vl_model_embed_tokens(actor_module)
             if embed_tokens is not None:
                 embed_tokens.requires_grad_(False)
                 if self.rank == 0:
-                    print("[predictor model] Embed tokens are set to not trainable.")
+                    print("[allocator model] Embed tokens are set to not trainable.")
             else:
                 if self.rank == 0:
-                    print("[predictor model] No embed tokens found.")
+                    print("[allocator model] No embed tokens found.")
             if self.rank == 0:
-                print("[predictor model] Other Part is set to frozen.")
-                print("[predictor model] Predictor is set to trainable.")
+                print("[allocator model] Other Part is set to frozen.")
+                print("[allocator model] Allocator is set to trainable.")
         ###
 
         # Apply QAT before FSDP wrapping (actor only)
@@ -2331,7 +2331,7 @@ class PredictorWorker(Worker, DistProfilerExtension):
     def init_model(self):
         # from verl.workers.actor import DataParallelPPOActor
         ###
-        from resadapt.verl_patches.dp_predictor import DataParallelPPOActor
+        from resadapt.verl_patches.dp_allocator import DataParallelPPOActor
         ###
 
         # This is used to import external_lib into the huggingface systems
@@ -2467,9 +2467,9 @@ class PredictorWorker(Worker, DistProfilerExtension):
                 checkpoint_config=checkpoint_contents,
             )
 
-    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="predictor"))
-    @DistProfiler.annotate(color="red", role="predictor_update")
-    def update_predictor(self, data: DataProto):
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="allocator"))
+    @DistProfiler.annotate(color="red", role="allocator_update")
+    def update_allocator(self, data: DataProto):
         assert self._is_actor
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
@@ -2516,9 +2516,9 @@ class PredictorWorker(Worker, DistProfilerExtension):
                     data.meta_info["compute_frame_metrics"] = True
 
                 res = self.actor.update_policy(data=data)
-                predictor_log_probs = None
+                allocator_log_probs = None
                 if is_pred:
-                    predictor_log_probs = self.actor.collect_predictor_log_probs(
+                    allocator_log_probs = self.actor.collect_allocator_log_probs(
                         data=data,
                         video2list=self.config.get("video2list", False),
                         video2image=self.config.get("video2image", False),
@@ -2532,22 +2532,22 @@ class PredictorWorker(Worker, DistProfilerExtension):
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(
                 global_num_tokens, delta_time, images_seqlens=images_seqlens
             )
-            metrics["perf/mfu/predictor"] = (
+            metrics["perf/mfu/allocator"] = (
                 estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
             )
-            metrics["perf/max_memory_allocated_gb_predictor"] = get_torch_device().max_memory_allocated() / (1024**3)
-            metrics["perf/max_memory_reserved_gb_predictor"] = get_torch_device().max_memory_reserved() / (1024**3)
-            metrics["perf/cpu_memory_used_gb_predictor"] = psutil.virtual_memory().used / (1024**3)
+            metrics["perf/max_memory_allocated_gb_allocator"] = get_torch_device().max_memory_allocated() / (1024**3)
+            metrics["perf/max_memory_reserved_gb_allocator"] = get_torch_device().max_memory_reserved() / (1024**3)
+            metrics["perf/cpu_memory_used_gb_allocator"] = psutil.virtual_memory().used / (1024**3)
 
             lr = self.actor_lr_scheduler.get_last_lr()[0]
-            metrics["predictor/lr"] = lr.item() if torch.is_tensor(lr) else lr
+            metrics["allocator/lr"] = lr.item() if torch.is_tensor(lr) else lr
             self.actor_lr_scheduler.step()
 
             # TODO: here, we should return all metrics
             ###
             tensors = {}
-            if is_pred and predictor_log_probs is not None:
-                tensors["predictor_log_probs"] = predictor_log_probs
+            if is_pred and allocator_log_probs is not None:
+                tensors["allocator_log_probs"] = allocator_log_probs
             res_idx = 1
             if compute_frame_metrics and len(res) > res_idx:
                 frame_metrics = res[res_idx]
@@ -2571,7 +2571,7 @@ class PredictorWorker(Worker, DistProfilerExtension):
         return output
 
     ###
-    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="predictor"))
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="allocator"))
     @DistProfiler.annotate(color="red", role="scale")
     def scale_multi_modal(self, data: DataProto):
         # when is_lora is True, we use the actor without lora applied to calculate the log_prob
@@ -2728,7 +2728,7 @@ class PredictorWorker(Worker, DistProfilerExtension):
                 pass
 
 # ================================= Async related workers =================================
-class AsyncPredictorWorker(PredictorWorker):
+class AsyncAllocatorWorker(AllocatorWorker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self):
         # await self.rollout_mode()

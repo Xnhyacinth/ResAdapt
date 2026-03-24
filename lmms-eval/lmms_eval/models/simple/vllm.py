@@ -215,7 +215,7 @@ class VLLM(lmms):
             kwargs["distributed_executor_backend"] = "external_launcher"
         
         ###
-        if os.getenv("PREDICTOR_PATH", None) is None:
+        if os.getenv("ALLOCATOR_PATH", None) is None:
             self.client = LLM(
                 model=self.model,
                 tensor_parallel_size=tensor_parallel_size,

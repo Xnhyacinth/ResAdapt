@@ -66,7 +66,7 @@ from verl.utils.torch_functional import masked_mean
 # from verl.utils.tracking import ValidationGenerationsLogger
 ###
 from resadapt.utils.frame_metric_utils import sync_frame_metrics
-from resadapt.utils.logprob_utils import align_predictor_log_probs_to_batch
+from resadapt.utils.logprob_utils import align_allocator_log_probs_to_batch
 from resadapt.verl_patches.tracking import ValidationGenerationsLogger
 ###
 from verl.workers.config import FSDPEngineConfig
@@ -216,7 +216,7 @@ def compute_advantage(
 
         ###
         if "sid" in data.non_tensor_batch:
-            from resadapt.reward_fn.advantage import compute_predictor_advantage
+            from resadapt.reward_fn.advantage import compute_allocator_advantage
             use_cost_value = config.get("use_cost", None)
             scale_multi_modal_data = config.get("scale_multi_modal_data", "")
             global_step = 0
@@ -244,7 +244,7 @@ def compute_advantage(
                 print(f"switch use_cost to ${use_cost_value}")
 
 
-            predictor_advantages, predictor_update_mask = compute_predictor_advantage(
+            allocator_advantages, allocator_update_mask = compute_allocator_advantage(
                 scores=data.batch["token_level_rewards"],
                 uid=data.non_tensor_batch["uid"],
                 sid=data.non_tensor_batch["sid"],
@@ -268,15 +268,15 @@ def compute_advantage(
             scale_one_mask = data.non_tensor_batch.get("scale_one_mask", None)
             if scale_one_mask is not None:
                 scale_one_mask_tensor = torch.as_tensor(
-                    scale_one_mask, device=predictor_update_mask.device, dtype=torch.bool
+                    scale_one_mask, device=allocator_update_mask.device, dtype=torch.bool
                 )
-                if predictor_update_mask.dim() > 1:
-                    scale_one_mask_tensor = scale_one_mask_tensor.unsqueeze(1).expand_as(predictor_update_mask)
-                predictor_update_mask = predictor_update_mask & ~scale_one_mask_tensor
+                if allocator_update_mask.dim() > 1:
+                    scale_one_mask_tensor = scale_one_mask_tensor.unsqueeze(1).expand_as(allocator_update_mask)
+                allocator_update_mask = allocator_update_mask & ~scale_one_mask_tensor
             
             
-            data.batch["predictor_advantages"] = predictor_advantages
-            data.batch["predictor_update_mask"] = predictor_update_mask
+            data.batch["allocator_advantages"] = allocator_advantages
+            data.batch["allocator_update_mask"] = allocator_update_mask
 
         ###
     else:
@@ -380,8 +380,8 @@ class RayPPOTrainer:
         )
 
         ###
-        from verl.trainer.ppo.utils import need_predictor
-        self.use_predictor = need_predictor(self.config)
+        from verl.trainer.ppo.utils import need_allocator
+        self.use_allocator = need_allocator(self.config)
         ###
 
         # if ref_in_actor is True, the reference policy will be actor without lora applied
@@ -400,10 +400,10 @@ class RayPPOTrainer:
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
-    def _predictor_scale_enabled(self) -> bool:
-        if not self.use_predictor:
+    def _allocator_scale_enabled(self) -> bool:
+        if not self.use_allocator:
             return False
-        start_step = self.config.predictor.scale.get("scale_start_step", 0)
+        start_step = self.config.allocator.scale.get("scale_start_step", 0)
         try:
             start_step_int = int(start_step) if start_step is not None else 0
         except Exception:
@@ -595,7 +595,7 @@ class RayPPOTrainer:
     def _get_gen_batch(self, batch: DataProto) -> DataProto:
         reward_keys = set({"data_source", "reward_model", "extra_info", "uid"}) & batch.non_tensor_batch.keys()
         ###
-        if self._predictor_scale_enabled():
+        if self._allocator_scale_enabled():
             reward_keys.update(["ori_prompt", "sid"])
         ###
 
@@ -741,16 +741,16 @@ class RayPPOTrainer:
             scales_mean=None,
         )
 
-    def _scale_batch_with_predictor(
+    def _scale_batch_with_allocator(
         self,
         test_batch: "DataProto",
     ) -> tuple["DataProto", list[float]]:
-        # pad for predictor
-        size_divisor = max(self.config.actor_rollout_ref.rollout.agent.num_workers, self.config.predictor.scale.num_workers)
+        # pad for allocator
+        size_divisor = max(self.config.actor_rollout_ref.rollout.agent.num_workers, self.config.allocator.scale.num_workers)
         padded, pad_size = pad_dataproto_to_divisor(test_batch, size_divisor)
         padded.meta_info["eval_mode"] = True
 
-        scaled_padded = self.predictor_wg.scale_multi_modal(padded)
+        scaled_padded = self.allocator_wg.scale_multi_modal(padded)
         scaled = unpad_dataproto(scaled_padded, pad_size=pad_size)
 
         # compute mean scale per sample
@@ -806,7 +806,7 @@ class RayPPOTrainer:
             "validate": True,
             "global_steps": self.global_steps,
         }
-        do_scaled_pass = self._predictor_scale_enabled()
+        do_scaled_pass = self._allocator_scale_enabled()
 
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
@@ -837,9 +837,9 @@ class RayPPOTrainer:
                 test_batch = self._ensure_uid(test_batch)
                 test_batch = self._repeat_for_val(test_batch)
                 
-                # Sleep rollout replicas FSDP weights out of GPU memory to spare for predictor
+                # Sleep rollout replicas FSDP weights out of GPU memory to spare for allocator
                 self.checkpoint_manager.sleep_replicas()
-                scaled_batch, mean_scales = self._scale_batch_with_predictor(test_batch)
+                scaled_batch, mean_scales = self._scale_batch_with_allocator(test_batch)
                 scaled_scales_mean.extend(mean_scales)
                 # Wake up rollout model for generation
                 self.checkpoint_manager.update_weights()
@@ -1099,15 +1099,15 @@ class RayPPOTrainer:
             raise NotImplementedError
 
         ###
-        # create predictor if registered
-        if self.use_predictor:
-            resource_pool = self.resource_pool_manager.get_resource_pool(Role.Predictor)
-            predictor_cls = RayClassWithInitArgs(
-                cls=self.role_worker_mapping[Role.Predictor],
-                config=self.config.predictor,
-                role=str(Role.Predictor),
+        # create allocator if registered
+        if self.use_allocator:
+            resource_pool = self.resource_pool_manager.get_resource_pool(Role.Allocator)
+            allocator_cls = RayClassWithInitArgs(
+                cls=self.role_worker_mapping[Role.Allocator],
+                config=self.config.allocator,
+                role=str(Role.Allocator),
             )
-            self.resource_pool_to_cls[resource_pool][str(Role.Predictor)] = predictor_cls
+            self.resource_pool_to_cls[resource_pool][str(Role.Allocator)] = allocator_cls
         ###
 
         # create critic
@@ -1209,10 +1209,10 @@ class RayPPOTrainer:
                 self.ref_policy_wg = all_wg[str(Role.ActorRolloutRef)]
 
         ###
-        # initialize predictor worker if present
-        if self.use_predictor:
-            self.predictor_wg = all_wg[str(Role.Predictor)]
-            self.predictor_wg.init_model()
+        # initialize allocator worker if present
+        if self.use_allocator:
+            self.allocator_wg = all_wg[str(Role.Allocator)]
+            self.allocator_wg.init_model()
         ###
 
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
@@ -1317,17 +1317,17 @@ class RayPPOTrainer:
             )
 
         ###
-        if self.use_predictor:
-            predictor_local_path = os.path.join(local_global_step_folder, "predictor")
+        if self.use_allocator:
+            allocator_local_path = os.path.join(local_global_step_folder, "allocator")
 
-            predictor_remote_path = (
+            allocator_remote_path = (
                 None
                 if self.config.trainer.default_hdfs_dir is None
-                else os.path.join(self.config.trainer.default_hdfs_dir, f"global_step_{self.global_steps}", "predictor")
+                else os.path.join(self.config.trainer.default_hdfs_dir, f"global_step_{self.global_steps}", "allocator")
             )
 
-            self.predictor_wg.save_checkpoint(
-                predictor_local_path, predictor_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep
+            self.allocator_wg.save_checkpoint(
+                allocator_local_path, allocator_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep
             )
         ###
 
@@ -1402,12 +1402,12 @@ class RayPPOTrainer:
             )
 
         ###
-        if self.use_predictor:
-            # load predictor
-            predictor_path = os.path.join(global_step_folder, "predictor")
+        if self.use_allocator:
+            # load allocator
+            allocator_path = os.path.join(global_step_folder, "allocator")
 
-            self.predictor_wg.load_checkpoint(
-                predictor_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
+            self.allocator_wg.load_checkpoint(
+                allocator_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
             )
         ###
 
@@ -1429,8 +1429,8 @@ class RayPPOTrainer:
             if self.use_critic:
                 self.critic_wg.start_profile(profile_step=self.global_steps)
             ###
-            if self.use_predictor: 
-                self.predictor_wg.start_profile(profile_step=self.global_steps)
+            if self.use_allocator: 
+                self.allocator_wg.start_profile(profile_step=self.global_steps)
             ###
 
     def _stop_profiling(self, do_profile: bool) -> None:
@@ -1442,8 +1442,8 @@ class RayPPOTrainer:
             if self.use_critic:
                 self.critic_wg.stop_profile()
             ###
-            if self.use_predictor: 
-                self.predictor_wg.stop_profile()
+            if self.use_allocator: 
+                self.allocator_wg.stop_profile()
             ###
 
     def _get_dp_size(self, worker_group, role: str) -> int:
@@ -1643,15 +1643,15 @@ class RayPPOTrainer:
         return actor_output
 
     ###
-    def _update_predictor(self, batch: DataProto) -> DataProto:
-        if self.config.algorithm.get("use_filter_sid", False) and self.config.predictor.get("scale_n", 1) > 1:
+    def _update_allocator(self, batch: DataProto) -> DataProto:
+        if self.config.algorithm.get("use_filter_sid", False) and self.config.allocator.get("scale_n", 1) > 1:
             # print("update filter sid")
-            pred_mask = batch.batch['predictor_update_mask']
+            pred_mask = batch.batch['allocator_update_mask']
             valid_indices = torch.nonzero(pred_mask.bool())[:, 0]
 
             has_valid_data = len(valid_indices) > 0
             if not has_valid_data:
-                print("Warning: No valid predictor updates in this batch.")
+                print("Warning: No valid allocator updates in this batch.")
                 batch.meta_info["metrics"] = {}
                 return batch
 
@@ -1682,7 +1682,7 @@ class RayPPOTrainer:
         batch_scaled.meta_info["multi_turn"] = rollout_config.multi_turn.enable
         # TODO: Make "temperature" single source of truth from generation.
         batch_scaled.meta_info["temperature"] = rollout_config.temperature
-        # update predictor
+        # update allocator
         if self.use_legacy_worker_impl == "disable":
             batch_td = batch_scaled.to_tensordict()
             # step 2: convert from padding to no-padding
@@ -1703,36 +1703,36 @@ class RayPPOTrainer:
                 dataloader_kwargs={"shuffle": shuffle},
             )
 
-            predictor_output = self.predictor_wg.update_predictor(batch_td)
-            predictor_metrics = (
-                predictor_output.meta_info["metrics"]
-                if hasattr(predictor_output, "meta_info")
-                else tu.get(predictor_output, "metrics")
+            allocator_output = self.allocator_wg.update_allocator(batch_td)
+            allocator_metrics = (
+                allocator_output.meta_info["metrics"]
+                if hasattr(allocator_output, "meta_info")
+                else tu.get(allocator_output, "metrics")
             )
-            predictor_metrics = rename_dict(predictor_metrics, "predictor/")
+            allocator_metrics = rename_dict(allocator_metrics, "allocator/")
             # modify key name
-            predictor_metrics["perf/mfu/predictor"] = predictor_metrics.pop("predictor/mfu")
-            if hasattr(predictor_output, "meta_info"):
-                predictor_output.meta_info["metrics"] = predictor_metrics
+            allocator_metrics["perf/mfu/allocator"] = allocator_metrics.pop("allocator/mfu")
+            if hasattr(allocator_output, "meta_info"):
+                allocator_output.meta_info["metrics"] = allocator_metrics
             else:
-                predictor_output = DataProto.from_single_dict(data={}, meta_info={"metrics": predictor_metrics})
+                allocator_output = DataProto.from_single_dict(data={}, meta_info={"metrics": allocator_metrics})
         else:
-            predictor_output = self.predictor_wg.update_predictor(batch_scaled)
+            allocator_output = self.allocator_wg.update_allocator(batch_scaled)
 
-        batch.meta_info["metrics"] = predictor_output.meta_info["metrics"]
-        scale_multi_modal_data = str(self.config.predictor.get("scale_multi_modal_data", "scale")).lower()
+        batch.meta_info["metrics"] = allocator_output.meta_info["metrics"]
+        scale_multi_modal_data = str(self.config.allocator.get("scale_multi_modal_data", "scale")).lower()
         if self.config.algorithm.get("use_filter_sid", False) and "ispred" in scale_multi_modal_data:
-            if self.config.predictor.get("scale_n", 1) > 1:
-                batch.batch["predictor_log_probs"] = align_predictor_log_probs_to_batch(
+            if self.config.allocator.get("scale_n", 1) > 1:
+                batch.batch["allocator_log_probs"] = align_allocator_log_probs_to_batch(
                     original_sids=batch.non_tensor_batch["sid"],
                     updated_sids=batch_scaled.non_tensor_batch["sid"],
-                    updated_log_probs=predictor_output.batch["predictor_log_probs"],
-                    old_log_probs=batch.batch["predictor_old_log_probs"],
+                    updated_log_probs=allocator_output.batch["allocator_log_probs"],
+                    old_log_probs=batch.batch["allocator_old_log_probs"],
                 )
             else:
-                batch.batch['predictor_log_probs'] = predictor_output.batch['predictor_log_probs']
+                batch.batch['allocator_log_probs'] = allocator_output.batch['allocator_log_probs']
 
-        sync_frame_metrics(batch.batch, predictor_output.batch)
+        sync_frame_metrics(batch.batch, allocator_output.batch)
 
         return batch
     ###
@@ -1845,8 +1845,8 @@ class RayPPOTrainer:
                 )
 
                 ###
-                if self._predictor_scale_enabled():
-                    scale_n = self.config.predictor.get("scale_n", 1)
+                if self._allocator_scale_enabled():
+                    scale_n = self.config.allocator.get("scale_n", 1)
                     if scale_n > 1:
                         batch = batch.repeat(repeat_times=scale_n, interleave=True)
 
@@ -1859,7 +1859,7 @@ class RayPPOTrainer:
                             [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
                         )
 
-                        scale_one_ratio = float(self.config.predictor.get("scale_one_ratio", 0.0))
+                        scale_one_ratio = float(self.config.allocator.get("scale_one_ratio", 0.0))
                         original_batch_size = len(batch.batch)
 
                         if scale_one_ratio > 0:
@@ -1876,7 +1876,7 @@ class RayPPOTrainer:
                             batch.non_tensor_batch["scale_one_mask"] = scale_one_mask
 
                     with marked_timer("scale", timing_raw, color="cyan"):
-                        batch = self.predictor_wg.scale_multi_modal(batch)
+                        batch = self.allocator_wg.scale_multi_modal(batch)
                         sync_frame_metrics(batch.batch, batch.batch)
 
                 ###
@@ -2083,13 +2083,13 @@ class RayPPOTrainer:
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
                         ###
-                        # update predictor
-                        # print("update predictor")
-                        if self._predictor_scale_enabled():
-                            with marked_timer("update_predictor", timing_raw, color="red"):
-                                batch = self._update_predictor(batch)
-                                predictor_output_metrics = reduce_metrics(batch.meta_info.pop("metrics"))
-                                metrics.update(predictor_output_metrics)
+                        # update allocator
+                        # print("update allocator")
+                        if self._allocator_scale_enabled():
+                            with marked_timer("update_allocator", timing_raw, color="red"):
+                                batch = self._update_allocator(batch)
+                                allocator_output_metrics = reduce_metrics(batch.meta_info.pop("metrics"))
+                                metrics.update(allocator_output_metrics)
                         ###
                         # breakpoint()
                         # print("update actor")

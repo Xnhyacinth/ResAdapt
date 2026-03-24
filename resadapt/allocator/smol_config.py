@@ -1,8 +1,8 @@
 from transformers import PretrainedConfig
 
 
-class SmolPredictorConfig(PretrainedConfig):
-    model_type = "smol_predictor"
+class SmolAllocatorConfig(PretrainedConfig):
+    model_type = "smol_allocator"
 
     def __init__(
         self,
@@ -166,4 +166,4 @@ class SmolPredictorConfig(PretrainedConfig):
         return getattr(self, key, default)
 
 
-__all__ = ["SmolPredictorConfig"]
+__all__ = ["SmolAllocatorConfig"]

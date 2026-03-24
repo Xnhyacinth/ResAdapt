@@ -1,8 +1,8 @@
 """
-DifferentiableImportancePredictor: A frame importance predictor that captures
+DifferentiableImportanceAllocator: A frame importance allocator that captures
 per-frame information content and text relevance to output differentiated scales.
 
-Key improvements over FrameWiseScalePredictor:
+Key improvements over FrameWiseScaleAllocator:
 1. Frame Information Encoder - evaluates per-frame information content
 2. Cross-Modal Matcher - computes frame-text relevance independently
 3. Sparse Gating - Gumbel-Softmax/Top-k for sharper attention
@@ -492,12 +492,12 @@ class ContrastiveDifferentiator(nn.Module):
 
 
 # ============================================================================
-# Main Predictor: DifferentiableImportancePredictor
+# Main Allocator: DifferentiableImportanceAllocator
 # ============================================================================
 
-class DifferentiableImportancePredictor(ModuleUtilsMixin, nn.Module):
+class DifferentiableImportanceAllocator(ModuleUtilsMixin, nn.Module):
     """
-    A predictor that captures per-frame importance based on:
+    A allocator that captures per-frame importance based on:
     1. Frame information content (intrinsic)
     2. Text relevance (extrinsic)
     

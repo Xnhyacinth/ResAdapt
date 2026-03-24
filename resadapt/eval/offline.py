@@ -340,8 +340,8 @@ def _apply_vllm_patches():
     vllm.model_executor.models.qwen2_5_vl.Qwen2_5_VLForConditionalGeneration.get_mrope_input_positions = get_mrope_input_positions
 
 
-def _load_predictor_on_gpu0(
-    predictor_path: str,
+def _load_allocator_on_gpu0(
+    allocator_path: str,
     *,
     max_frames: Optional[int],
     max_scale_override: Optional[float],
@@ -351,7 +351,7 @@ def _load_predictor_on_gpu0(
         torch.cuda.set_device(0)
     except Exception:
         pass
-    config = AutoConfig.from_pretrained(predictor_path, trust_remote_code=True)
+    config = AutoConfig.from_pretrained(allocator_path, trust_remote_code=True)
     if max_frames is not None:
         try:
             max_frames_val = int(max_frames)
@@ -369,15 +369,15 @@ def _load_predictor_on_gpu0(
             setattr(config, "min_scale", float(min_scale_override))
         except Exception:
             pass
-    predictor = AutoModel.from_pretrained(
-        predictor_path,
+    allocator = AutoModel.from_pretrained(
+        allocator_path,
         config=config,
         dtype="auto",
         device_map={"": 0},
         trust_remote_code=True,
     )
-    predictor.eval()
-    return predictor
+    allocator.eval()
+    return allocator
 
 
 def _run_one_generate(llm: Any, sampling_params: Any, vllm_inputs: Dict[str, Any]) -> Tuple[float, str, Optional[int], Optional[int]]:
@@ -399,7 +399,7 @@ def main():
     parser.add_argument("--model", type=str, default=os.getenv("VLLM_MODEL", "Qwen/Qwen3-VL-8B-Instruct"))
     parser.add_argument("--video", type=str, default=os.getenv("VIDEO_PATH", ""))
     parser.add_argument("--prompt", type=str, default=os.getenv("VIDEO_PROMPT", "Describe the video briefly."))
-    parser.add_argument("--predictor-path", type=str, default=os.getenv("PREDICTOR_PATH", ""))
+    parser.add_argument("--allocator-path", type=str, default=os.getenv("ALLOCATOR_PATH", ""))
     parser.add_argument("--runs", type=int, default=int(os.getenv("RUNS", "20")))
     parser.add_argument("--warmup", type=int, default=int(os.getenv("WARMUP", "2")))
 
@@ -435,33 +435,33 @@ def main():
 
     scales_list = None
     masks_list = None
-    predictor_load_s = None
+    allocator_load_s = None
     scale_s_list = None
 
-    if args.predictor_path:
+    if args.allocator_path:
         t_load0 = time.time()
-        predictor = _load_predictor_on_gpu0(
-            args.predictor_path,
+        allocator = _load_allocator_on_gpu0(
+            args.allocator_path,
             max_frames=args.max_frames,
             max_scale_override=args.max_scale,
             min_scale_override=args.min_scale,
         )
         t_load1 = time.time()
-        predictor_load_s = t_load1 - t_load0
+        allocator_load_s = t_load1 - t_load0
 
-        max_scale = float(getattr(predictor.config, "max_scale", 2.0))
-        min_scale = float(getattr(predictor.config, "min_scale", 0.25))
-        use_discrete_action = bool(getattr(predictor.config, "use_discrete_action", False))
-        discrete_step = float(getattr(predictor.config, "discrete_step", 0.25))
+        max_scale = float(getattr(allocator.config, "max_scale", 2.0))
+        min_scale = float(getattr(allocator.config, "min_scale", 0.25))
+        use_discrete_action = bool(getattr(allocator.config, "use_discrete_action", False))
+        discrete_step = float(getattr(allocator.config, "discrete_step", 0.25))
 
         for _ in range(max(0, int(args.warmup))):
             with torch.inference_mode():
-                _ = predictor(messages=[hf_messages], eval_mode=True, return_mm_data=False)
+                _ = allocator(messages=[hf_messages], eval_mode=True, return_mm_data=False)
 
         if bool(args.profile):
             _profile_torch_callable(
-                "predictor_forward",
-                lambda: predictor(messages=[hf_messages], eval_mode=True, return_mm_data=False),
+                "allocator_forward",
+                lambda: allocator(messages=[hf_messages], eval_mode=True, return_mm_data=False),
                 topk=int(args.profile_topk),
             )
 
@@ -471,7 +471,7 @@ def main():
         for _ in range(int(args.runs)):
             t0 = time.time()
             with torch.inference_mode():
-                out = predictor(messages=[hf_messages], eval_mode=True, return_mm_data=False)
+                out = allocator(messages=[hf_messages], eval_mode=True, return_mm_data=False)
             scales_cpu, mask_cpu, _ = compute_scales_and_sample_means_cpu(
                 out,
                 max_scale=max_scale,
@@ -486,7 +486,7 @@ def main():
 
         s_mean, s_std = _mean_std(scale_s_list)
         print(
-            f"[predictor] load_s={predictor_load_s:.4f} "
+            f"[allocator] load_s={allocator_load_s:.4f} "
             f"scale_s_mean={s_mean:.4f} scale_s_std={s_std:.4f} runs={len(scale_s_list)}"
         )
 
@@ -506,9 +506,9 @@ def main():
 
         mean_scales = [_mean_scale(scales_list[i], masks_list[i]) for i in range(len(scales_list))]
         ms_mean, ms_std = _mean_std(mean_scales)
-        print(f"[predictor_scale] mean_scale_mean={ms_mean:.4f} mean_scale_std={ms_std:.4f} runs={len(mean_scales)}")
+        print(f"[allocator_scale] mean_scale_mean={ms_mean:.4f} mean_scale_std={ms_std:.4f} runs={len(mean_scales)}")
 
-        del predictor
+        del allocator
         gc.collect()
         try:
             torch.cuda.empty_cache()

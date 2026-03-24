@@ -694,8 +694,8 @@ def evaluate(
                             # else:
                             #     filtered_arguments.append(_handle_non_serializable(value))
 
-                    has_predictor_scale = [getattr(req, "has_predictor_scale", False) for req in requests]
-                    if any(bool(v) for v in has_predictor_scale):
+                    has_allocator_scale = [getattr(req, "has_allocator_scale", False) for req in requests]
+                    if any(bool(v) for v in has_allocator_scale):
                         scales_value = None
                         for req in requests:
                             req_scales = getattr(req, "scales", None)
@@ -726,7 +726,7 @@ def evaluate(
                         "rescaled_mm_data": rescaled_mm_data,
                         "scale_stats": [getattr(req, "scale_stats", None) for req in requests],
                         "visual_len": [getattr(req, "visual_len", None) for req in requests],
-                        "has_predictor_scale": has_predictor_scale,
+                        "has_allocator_scale": has_allocator_scale,
                         "generation_s": [getattr(req, "generation_s", None) for req in requests],
                         "scale_preprocess_s": [getattr(req, "scale_preprocess_s", None) for req in requests],
                         "scale_time_s": [getattr(req, "scale_time_s", None) for req in requests],
@@ -763,10 +763,10 @@ def evaluate(
                 task_name = task_output.task_name
                 for sample in task_output.logged_samples:
                     rescaled_mm_data = sample.get("rescaled_mm_data", None)
-                    has_predictor_scale = sample.get("has_predictor_scale", None)
-                    if isinstance(has_predictor_scale, (list, tuple)):
-                        has_predictor_scale = any(bool(v) for v in has_predictor_scale)
-                    if rescaled_mm_data is None or not has_predictor_scale:
+                    has_allocator_scale = sample.get("has_allocator_scale", None)
+                    if isinstance(has_allocator_scale, (list, tuple)):
+                        has_allocator_scale = any(bool(v) for v in has_allocator_scale)
+                    if rescaled_mm_data is None or not has_allocator_scale:
                         continue
                     if not plot_rescaled:
                         continue

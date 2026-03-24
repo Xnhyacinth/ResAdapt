@@ -4,10 +4,10 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from resadapt.allocator.aznet_v3 import FrameWiseScalePredictor
+from resadapt.allocator.aznet_v3 import FrameWiseScaleAllocator
 
 
-class SaliencyShareScalePredictor(FrameWiseScalePredictor):
+class SaliencyShareScaleAllocator(FrameWiseScaleAllocator):
     """Quality-first scale policy driven by per-frame saliency share."""
 
     def __init__(self, *args, dim: int, heads: int = 8, dropout: float = 0.0, ff_mult: int = 4, **kwargs):

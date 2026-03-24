@@ -3,12 +3,12 @@ import torch.nn as nn
 from torch.nn.utils.rnn import pad_sequence
 from transformers.modeling_utils import ModuleUtilsMixin
 
-from resadapt.allocator.aznet_v3 import FrameWiseScalePredictor
-from resadapt.allocator.importance_predictor_v2 import DifferentiableImportancePredictor
-from resadapt.allocator.saliency_share_predictor_v3 import SaliencyShareScalePredictor
+from resadapt.allocator.aznet_v3 import FrameWiseScaleAllocator
+from resadapt.allocator.importance_allocator_v2 import DifferentiableImportanceAllocator
+from resadapt.allocator.saliency_share_allocator_v3 import SaliencyShareScaleAllocator
 
 
-class RegressionHeadPredictorSmol(ModuleUtilsMixin, nn.Module):
+class RegressionHeadAllocatorSmol(ModuleUtilsMixin, nn.Module):
     def __init__(self, vision_config):
         super().__init__()
         llm_hidden_size = int(getattr(vision_config, "llm_hidden_size", 768))
@@ -30,13 +30,13 @@ class RegressionHeadPredictorSmol(ModuleUtilsMixin, nn.Module):
 
         use_differentiable = bool(getattr(vision_config, "use_differentiable_importance", False))
         use_discrete_action = bool(getattr(vision_config, "use_discrete_action", False))
-        predictor_arch = str(getattr(vision_config, "predictor_arch", "framewise_v3")).lower()
-        if use_differentiable and predictor_arch == "saliency_share_v1":
-            raise ValueError("`use_differentiable_importance` is incompatible with `predictor_arch=saliency_share_v1`.")
-        if use_discrete_action and predictor_arch == "saliency_share_v1":
-            raise ValueError("`predictor_arch=saliency_share_v1` requires continuous actions.")
+        allocator_arch = str(getattr(vision_config, "allocator_arch", "framewise_v3")).lower()
+        if use_differentiable and allocator_arch == "saliency_share_v1":
+            raise ValueError("`use_differentiable_importance` is incompatible with `allocator_arch=saliency_share_v1`.")
+        if use_discrete_action and allocator_arch == "saliency_share_v1":
+            raise ValueError("`allocator_arch=saliency_share_v1` requires continuous actions.")
         if use_differentiable:
-            self.scorer = DifferentiableImportancePredictor(
+            self.scorer = DifferentiableImportanceAllocator(
                 dim=output_dim,
                 depth=getattr(vision_config, "self_depth", 2),
                 dim_head=getattr(vision_config, "dim_head", 64),
@@ -68,8 +68,8 @@ class RegressionHeadPredictorSmol(ModuleUtilsMixin, nn.Module):
                 temporal_use_pos=getattr(vision_config, "temporal_use_pos", True),
                 dual_path_depth=getattr(vision_config, "dual_path_depth", 1),
             )
-        elif predictor_arch == "saliency_share_v1":
-            self.scorer = SaliencyShareScalePredictor(
+        elif allocator_arch == "saliency_share_v1":
+            self.scorer = SaliencyShareScaleAllocator(
                 dim=output_dim,
                 depth=getattr(vision_config, "self_depth", 2),
                 dim_head=getattr(vision_config, "dim_head", 64),
@@ -101,8 +101,8 @@ class RegressionHeadPredictorSmol(ModuleUtilsMixin, nn.Module):
                 init_scale_mean=getattr(vision_config, "init_scale_mean", 1.0),
                 init_concentration=getattr(vision_config, "init_concentration", 4.0),
             )
-        elif predictor_arch in {"framewise_v3", "framewise_active_v1", "framewise"}:
-            self.scorer = FrameWiseScalePredictor(
+        elif allocator_arch in {"framewise_v3", "framewise_active_v1", "framewise"}:
+            self.scorer = FrameWiseScaleAllocator(
                 dim=output_dim,
                 depth=getattr(vision_config, "self_depth", 2),
                 dim_head=getattr(vision_config, "dim_head", 64),
@@ -135,7 +135,7 @@ class RegressionHeadPredictorSmol(ModuleUtilsMixin, nn.Module):
                 init_concentration=getattr(vision_config, "init_concentration", 4.0),
             )
         else:
-            raise ValueError(f"Unsupported predictor_arch: {predictor_arch}")
+            raise ValueError(f"Unsupported allocator_arch: {allocator_arch}")
         self.out_hidden_size = out_hidden_size
         self.output_dim = output_dim
         if hasattr(self.scorer, "post_init") and callable(self.scorer.post_init):

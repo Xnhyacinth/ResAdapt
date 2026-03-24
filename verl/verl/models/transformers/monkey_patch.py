@@ -309,14 +309,14 @@ def apply_monkey_patch(
         tiled_mlp_shards: Number of shards for TiledMLP (higher = lower memory, slightly slower).
     """
     ###
-    is_pure_predictor = (
-        model.__class__.__name__ == "PredictorForConditionalGeneration" 
-        or hasattr(model, "predictor") 
+    is_pure_allocator = (
+        model.__class__.__name__ == "AllocatorForConditionalGeneration" 
+        or hasattr(model, "allocator") 
     )
 
-    if is_pure_predictor:
+    if is_pure_allocator:
         module = sys.modules[model.__module__]
-        print(f"[MonkeyPatch] Detected Predictor Model: {model.__class__.__name__}")
+        print(f"[MonkeyPatch] Detected Allocator Model: {model.__class__.__name__}")
         
         if use_remove_padding or ulysses_sp_size > 1:
             if hasattr(module, "_flash_attention_forward"):  # transformers <= 4.47.1 or legacy models
@@ -330,7 +330,7 @@ def apply_monkey_patch(
 
         patch_forward_with_backends(model, use_fused_kernels=use_fused_kernels, fused_kernels_backend=fused_kernels_backend)
 
-        print("[MonkeyPatch] Predictor patch finished. Returning early.")
+        print("[MonkeyPatch] Allocator patch finished. Returning early.")
         return
     ###
 

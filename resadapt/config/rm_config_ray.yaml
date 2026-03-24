@@ -38,13 +38,13 @@ data:
 actor_rollout_ref:
   # actor:
     # scale_multi_modal_data: False
-    # predictor_lr: 1e-5
+    # allocator_lr: 1e-5
     # scale_n: 1
   model:
     min_scale: 0.25
     max_scale: 3.0
     scale_multi_modal_data: null
-    predictor_lr: 1e-5
+    allocator_lr: 1e-5
     scale_n: 1
 # actor_rollout_ref:
 #   actor:

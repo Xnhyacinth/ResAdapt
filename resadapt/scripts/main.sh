@@ -94,9 +94,9 @@ val_max_samples=-1
 
 train_nodes=${NNODES}
 if [[ "$scale_multi_modal_data" == *"sep"* ]]; then
-    # extra_args+=( "predictor.dedicated_8gpu=True" )
-    extra_args+=( "predictor.enable_resource_pool=True" )
-    extra_args+=( "predictor.nnodes=2" )
+    # extra_args+=( "allocator.dedicated_8gpu=True" )
+    extra_args+=( "allocator.enable_resource_pool=True" )
+    extra_args+=( "allocator.nnodes=2" )
     train_nodes=$((NNODES - 2))
     if [[ $train_nodes -le 0 ]]; then
         train_nodes=1
@@ -301,7 +301,7 @@ if [[ "$scale_multi_modal_data" == *"nframes"* ]]; then
     
     if [[ "$scale_multi_modal_data" == *"vid_list"* ]]; then
         extra_args+=( "data.video2list=True" )
-        extra_args+=( "predictor.video2list=True" )
+        extra_args+=( "allocator.video2list=True" )
 
         ppo_micro_batch_size_per_gpu=$((${ppo_micro_batch_size_per_gpu} / 2))
         train_prompt_bsz=$((${train_prompt_bsz} / 2))
@@ -309,7 +309,7 @@ if [[ "$scale_multi_modal_data" == *"nframes"* ]]; then
 
     elif [[ "$scale_multi_modal_data" != *"video"* ]]; then
         extra_args+=( "data.video2image=True" )
-        extra_args+=( "predictor.video2image=True" )
+        extra_args+=( "allocator.video2image=True" )
 
         ppo_micro_batch_size_per_gpu=$((${ppo_micro_batch_size_per_gpu} / 2))
         train_prompt_bsz=$((${train_prompt_bsz} / 2))
@@ -377,53 +377,53 @@ if [[ "$scale_multi_modal_data" == *"scale"* ]]; then
     exp_name="${scale_multi_modal_data}-${strategy}-s${scale_n}-${model_size}-bsz${train_prompt_bsz}-mini${train_prompt_mini_bsz}-n${n_resp_per_prompt}-max${max_scale}-len${prompt_len_arg}-resp${resp_len_arg}"
     
     if [[ "$scale_multi_modal_data" == *"ent"* ]]; then
-        extra_args+=( "predictor.actor.entropy_coeff=5e-3" )
+        extra_args+=( "allocator.actor.entropy_coeff=5e-3" )
     fi
     
     if [[ "$scale_multi_modal_data" == *"smol"* ]]; then
         if [[ "$scale_multi_modal_data" == *"head"* ]]; then
-            PREDICTOR_PATH=YOUR_WORKSPACE_PATH/models/predictor_head
+            ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocator_head
         elif [[ "$scale_multi_modal_data" == *"embed"* ]]; then
-            PREDICTOR_PATH=YOUR_WORKSPACE_PATH/models/predictor_embed
+            ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocator_embed
         elif [[ "$scale_multi_modal_data" == *"v4"* ]]; then
-            PREDICTOR_PATH=YOUR_WORKSPACE_PATH/models/predictor_smolv4
+            ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocator_smolv4
         elif [[ "$scale_multi_modal_data" == *"v2"* ]]; then
-            PREDICTOR_PATH=YOUR_WORKSPACE_PATH/models/predictor_smolv2_zero
+            ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocator_smolv2_zero
         elif [[ "$scale_multi_modal_data" == *"v1"* ]]; then
-            PREDICTOR_PATH=YOUR_WORKSPACE_PATH/models/predictor_smolv1
+            ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocator_smolv1
         elif [[ "$scale_multi_modal_data" == *"v3"* ]]; then
-            PREDICTOR_PATH=YOUR_WORKSPACE_PATH/models/predictor_smolv3
+            ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocator_smolv3
         else
-            PREDICTOR_PATH=YOUR_WORKSPACE_PATH/models/predictor_smol
+            ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocator_smol
         fi
-        extra_args+=( "+predictor.model.override_config.max_frames=${max_frames}" )
+        extra_args+=( "+allocator.model.override_config.max_frames=${max_frames}" )
     else
         if [[ "$scale_multi_modal_data" == *"v2bd"* ]]; then
-            PREDICTOR_PATH=YOUR_WORKSPACE_PATH/models/predictorv2_beta_deep
+            ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocatorv2_beta_deep
         elif [[ "$scale_multi_modal_data" == *"v2b"* ]]; then
-            PREDICTOR_PATH=YOUR_WORKSPACE_PATH/models/predictorv2_beta
+            ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocatorv2_beta
         elif [[ "$scale_multi_modal_data" == *"v1b"* ]]; then
-            PREDICTOR_PATH=YOUR_WORKSPACE_PATH/models/predictorv1_beta
+            ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocatorv1_beta
         elif [[ "$scale_multi_modal_data" == *"v3bd0"* ]]; then
-            PREDICTOR_PATH=YOUR_WORKSPACE_PATH/models/predictorv3_beta_deep_zero
+            ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocatorv3_beta_deep_zero
         elif [[ "$scale_multi_modal_data" == *"v3b"* ]]; then
-            PREDICTOR_PATH=YOUR_WORKSPACE_PATH/models/predictorv3
+            ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocatorv3
         elif [[ "$scale_multi_modal_data" == *"v2"* ]]; then
-            PREDICTOR_PATH=YOUR_WORKSPACE_PATH/models/predictorv2
+            ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocatorv2
         elif [[ "$scale_multi_modal_data" == *"v1"* ]]; then
-            PREDICTOR_PATH=YOUR_WORKSPACE_PATH/models/predictorv1
+            ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocatorv1
         elif [[ "$scale_multi_modal_data" == *"flash"* ]]; then
-            PREDICTOR_PATH=YOUR_WORKSPACE_PATH/models/predictor_flash_new
+            ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocator_flash_new
         elif [[ "$scale_multi_modal_data" == *"gate"* ]]; then
-            PREDICTOR_PATH=YOUR_WORKSPACE_PATH/models/predictor_gate
+            ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocator_gate
         elif [[ "$scale_multi_modal_data" == *"disc"* ]]; then
-            PREDICTOR_PATH=YOUR_WORKSPACE_PATH/models/predictor_disc_new
+            ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocator_disc_new
             min_scale=0.25
             use_discrete_action=True
         else
-            PREDICTOR_PATH=YOUR_WORKSPACE_PATH/models/predictor
+            ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocator
         fi
-        extra_args+=( "+predictor.model.override_config.max_frames=$((${max_frames} / 2))" )
+        extra_args+=( "+allocator.model.override_config.max_frames=$((${max_frames} / 2))" )
     fi
 
     # if [[ "$model_size" == "7B" && $scaled_length -gt $((1024*24)) ]]; then
@@ -433,31 +433,31 @@ if [[ "$scale_multi_modal_data" == *"scale"* ]]; then
 
     if [[ "$scale_multi_modal_data" =~ sta[_\=\ ]*([0-9]+) ]]; then
         num=${BASH_REMATCH[1]}
-        extra_args+=( "predictor.scale.scale_start_step=${num}" )
+        extra_args+=( "allocator.scale.scale_start_step=${num}" )
 
-        PREDICTOR_PATH=YOUR_WORKSPACE_PATH/ResAdapt/ckpts/VideoQA_Qwen_Verify/ray2-scale_fla_is_filt_tie_enc0.15_cen0.5_nframes8_video_mrope-fsdp2-s16-7B-bsz128-mini32-n1-max2.0-len4-resp8_5e-6/global_step_110/pred
+        ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/ResAdapt/ckpts/VideoQA_Qwen_Verify/ray2-scale_fla_is_filt_tie_enc0.15_cen0.5_nframes8_video_mrope-fsdp2-s16-7B-bsz128-mini32-n1-max2.0-len4-resp8_5e-6/global_step_110/pred
     fi
 
     extra_args+=( "algorithm.max_scale=${max_scale}" )
     extra_args+=( "algorithm.min_scale=${min_scale}" )
     extra_args+=( "algorithm.use_discrete_action=${use_discrete_action}" )
 
-    extra_args+=( "predictor.enable=True" )
-    extra_args+=( "predictor.scale_multi_modal_data=${scale_multi_modal_data}" )
-    extra_args+=( "predictor.model.path=${PREDICTOR_PATH}" )
-    extra_args+=( "predictor.scale_n=${scale_n}" )
-    extra_args+=( "+predictor.model.override_config.attn_implementation=flash_attention_2" )
-    extra_args+=( "+predictor.model.override_config.min_scale=${min_scale}" )
-    extra_args+=( "+predictor.model.override_config.max_scale=${max_scale}" )
-    # extra_args+=( "+predictor.model.override_config.self_depth=${self_depth}" )
-    # extra_args+=( "+predictor.model.override_config.cross_depth=${cross_depth}" )
-    extra_args+=( "+predictor.model.override_config.use_text=${use_text}" )
-    extra_args+=( "predictor.actor.loss_agg_mode=token-mean" )
-    extra_args+=( "predictor.actor.optim.lr=${lr}" )
-    extra_args+=( "predictor.actor.ppo_micro_batch_size_per_gpu=${ppo_micro_batch_size_per_gpu}" )
-    extra_args+=( "predictor.actor.use_dynamic_bsz=False" )
-    extra_args+=( "predictor.return_mm_data=False" )
-    extra_args+=( "predictor.scale.num_workers=$((8 * ${NNODES}))" )
+    extra_args+=( "allocator.enable=True" )
+    extra_args+=( "allocator.scale_multi_modal_data=${scale_multi_modal_data}" )
+    extra_args+=( "allocator.model.path=${ALLOCATOR_PATH}" )
+    extra_args+=( "allocator.scale_n=${scale_n}" )
+    extra_args+=( "+allocator.model.override_config.attn_implementation=flash_attention_2" )
+    extra_args+=( "+allocator.model.override_config.min_scale=${min_scale}" )
+    extra_args+=( "+allocator.model.override_config.max_scale=${max_scale}" )
+    # extra_args+=( "+allocator.model.override_config.self_depth=${self_depth}" )
+    # extra_args+=( "+allocator.model.override_config.cross_depth=${cross_depth}" )
+    extra_args+=( "+allocator.model.override_config.use_text=${use_text}" )
+    extra_args+=( "allocator.actor.loss_agg_mode=token-mean" )
+    extra_args+=( "allocator.actor.optim.lr=${lr}" )
+    extra_args+=( "allocator.actor.ppo_micro_batch_size_per_gpu=${ppo_micro_batch_size_per_gpu}" )
+    extra_args+=( "allocator.actor.use_dynamic_bsz=False" )
+    extra_args+=( "allocator.return_mm_data=False" )
+    extra_args+=( "allocator.scale.num_workers=$((8 * ${NNODES}))" )
 
     extra_args+=( "actor_rollout_ref.scale_n=${scale_n}" )
     extra_args+=( "actor_rollout_ref.scale_multi_modal_data=${scale_multi_modal_data}" )
@@ -476,20 +476,20 @@ if [[ "$scale_multi_modal_data" == *"scale"* ]]; then
     fi
 
     if [[ "$scale_multi_modal_data" == *"ccen"* ]]; then
-        extra_args+=( "predictor.scale.concentration_coef=5e-4" )
+        extra_args+=( "allocator.scale.concentration_coef=5e-4" )
     fi
-    extra_args+=( "+predictor.model.override_config.beta_param_scale=0.5" )
+    extra_args+=( "+allocator.model.override_config.beta_param_scale=0.5" )
 
     if [[ "$scale_multi_modal_data" == *"sim"* ]]; then
-        extra_args+=( "predictor.scale.contrastive_coef=1e-3" )
-        extra_args+=( "predictor.scale.sim_scale_coef=1e-3" )
+        extra_args+=( "allocator.scale.contrastive_coef=1e-3" )
+        extra_args+=( "allocator.scale.sim_scale_coef=1e-3" )
 
-        extra_args+=( "+predictor.model.override_config.sim_scale_weight=0.2" )
-        extra_args+=( "+predictor.model.override_config.contrastive_weight=0.2" )
+        extra_args+=( "+allocator.model.override_config.sim_scale_weight=0.2" )
+        extra_args+=( "+allocator.model.override_config.contrastive_weight=0.2" )
         
     else
-        extra_args+=( "+predictor.model.override_config.sim_scale_weight=0.0" )
-        extra_args+=( "+predictor.model.override_config.contrastive_weight=0.0" )
+        extra_args+=( "+allocator.model.override_config.sim_scale_weight=0.0" )
+        extra_args+=( "+allocator.model.override_config.contrastive_weight=0.0" )
     fi
     
     if [[ "$scale_multi_modal_data" == *"cost"* ]]; then

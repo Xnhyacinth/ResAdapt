@@ -1,5 +1,5 @@
 """
-FrameWiseScalePredictorLightV2: Lightweight frame-scale predictor
+FrameWiseScaleAllocatorLightV2: Lightweight frame-scale allocator
 
 Key updates:
 1. Grouped batch processing instead of per-sample loops
@@ -224,9 +224,9 @@ class CrossAttentionStack(nn.Module):
         return x
 
 
-class FrameWiseScalePredictorLightV2(ModuleUtilsMixin, nn.Module):
+class FrameWiseScaleAllocatorLightV2(ModuleUtilsMixin, nn.Module):
     """
-    Lightweight frame-scale predictor with grouped processing, frame-level
+    Lightweight frame-scale allocator with grouped processing, frame-level
     temporal encoding, optional text-conditioned spatial attention, and RoPE caching.
     """
     
@@ -862,7 +862,7 @@ if __name__ == '__main__':
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
     print("=" * 60)
-    print("Testing FrameWiseScalePredictorLightV2")
+    print("Testing FrameWiseScaleAllocatorLightV2")
     print("=" * 60)
     
     DIM = 512
@@ -872,7 +872,7 @@ if __name__ == '__main__':
     BATCH_SIZE = 4
     
     print("\n--- Testing Basic Version ---")
-    model = FrameWiseScalePredictorLightV2(
+    model = FrameWiseScaleAllocatorLightV2(
         dim=DIM,
         depth=2,
         dim_head=64,
@@ -927,7 +927,7 @@ if __name__ == '__main__':
     
     # 测试文本感知版本
     print("\n--- Testing Text-Conditioned Version ---")
-    model_tc = FrameWiseScalePredictorLightV2(
+    model_tc = FrameWiseScaleAllocatorLightV2(
         dim=DIM,
         depth=2,
         dim_head=64,
@@ -956,7 +956,7 @@ if __name__ == '__main__':
     
     # 测试离散动作版本
     print("\n--- Testing Discrete Action Version ---")
-    model_discrete = FrameWiseScalePredictorLightV2(
+    model_discrete = FrameWiseScaleAllocatorLightV2(
         dim=DIM,
         depth=2,
         dim_head=64,

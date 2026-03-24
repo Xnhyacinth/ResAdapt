@@ -4,11 +4,11 @@ import torch.nn as nn
 from torch.nn.utils.rnn import pad_sequence
 from transformers.modeling_utils import ModuleUtilsMixin
 
-from resadapt.allocator.aznet_v1 import FrameWiseScalePredictor
-from resadapt.allocator.importance_predictor_v2 import DifferentiableImportancePredictor
+from resadapt.allocator.aznet_v1 import FrameWiseScaleAllocator
+from resadapt.allocator.importance_allocator_v2 import DifferentiableImportanceAllocator
 
 
-class RegressionHeadPredictorSmol(ModuleUtilsMixin, nn.Module):
+class RegressionHeadAllocatorSmol(ModuleUtilsMixin, nn.Module):
     def __init__(self, vision_config):
         super().__init__()
         llm_hidden_size = int(getattr(vision_config, "llm_hidden_size", 768))
@@ -29,7 +29,7 @@ class RegressionHeadPredictorSmol(ModuleUtilsMixin, nn.Module):
         self.spatial_merge_size = vision_config.spatial_merge_size
 
         use_differentiable = bool(getattr(vision_config, "use_differentiable_importance", False))
-        scorer_cls = DifferentiableImportancePredictor if use_differentiable else FrameWiseScalePredictor
+        scorer_cls = DifferentiableImportanceAllocator if use_differentiable else FrameWiseScaleAllocator
         scorer_kwargs = dict(
             dim=output_dim,
             depth=getattr(vision_config, "self_depth", 2),

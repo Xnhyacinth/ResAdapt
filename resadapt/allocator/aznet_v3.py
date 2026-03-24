@@ -380,7 +380,7 @@ class SmallTextEncoder(nn.Module):
         return x
 
 
-class PredictorDecoderLayer(ModuleUtilsMixin, nn.Module):
+class AllocatorDecoderLayer(ModuleUtilsMixin, nn.Module):
     """
     A single unified layer that contains:
     1. Temporal Attention (optional based on depth)
@@ -420,7 +420,7 @@ class PredictorDecoderLayer(ModuleUtilsMixin, nn.Module):
         return hidden_states
 
 
-class PredictorConfig:
+class AllocatorConfig:
     """Helper to pass config params cleanly"""
     def __init__(self, **kwargs):
         for k, v in kwargs.items():
@@ -511,9 +511,9 @@ class TextFrameRelevanceScorer(nn.Module):
 
 
 
-class FrameWiseScalePredictor(ModuleUtilsMixin, nn.Module):
+class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
     """
-    Unified Predictor supporting both Discrete (Categorical) and Continuous (Beta) actions.
+    Unified Allocator supporting both Discrete (Categorical) and Continuous (Beta) actions.
     Predicts per-frame scale factors from patch-level vision features with optional text conditioning.
     Returns: (actions in [0,1], scale_factors in [min_scale,max_scale], log_prob).
     """
@@ -614,7 +614,7 @@ class FrameWiseScalePredictor(ModuleUtilsMixin, nn.Module):
             self.regression_head = ProjectorBlock(input_dim=dim, output_dim=output_dim, hidden_dim=dim // 2)
 
         # Active path: patch pooling -> frame mixing -> calibrated signals -> scale heads.
-        # We intentionally avoid an extra pre-pooling attention stack here so the predictor
+        # We intentionally avoid an extra pre-pooling attention stack here so the allocator
         # learns adaptive scale from a compact, stable frame-level pathway.
         self.temporal_mixer = SmallTextEncoder(
             dim=dim,
@@ -1234,20 +1234,20 @@ class FrameWiseScalePredictor(ModuleUtilsMixin, nn.Module):
             invalid_actions_obj = ~torch.isfinite(raw_actions_obj)
             if invalid_actions_obj.any():
                 invalid_count = int(invalid_actions_obj.sum().item())
-                print(f"[predictor] non-finite actions detected: {invalid_count}")
+                print(f"[allocator] non-finite actions detected: {invalid_count}")
                 raw_actions_obj = raw_actions_obj.masked_fill(invalid_actions_obj, 0.4)
 
         invalid_scales_obj = ~torch.isfinite(scales_obj)
         if invalid_scales_obj.any():
             invalid_count = int(invalid_scales_obj.sum().item())
-            print(f"[predictor] non-finite scales detected: {invalid_count}")
+            print(f"[allocator] non-finite scales detected: {invalid_count}")
             scales_obj = scales_obj.masked_fill(invalid_scales_obj, 1.0)
 
         if log_probs_obj is not None:
             invalid_log_probs_obj = ~torch.isfinite(log_probs_obj)
             if invalid_log_probs_obj.any():
                 invalid_count = int(invalid_log_probs_obj.sum().item())
-                print(f"[predictor] non-finite log_probs detected: {invalid_count}")
+                print(f"[allocator] non-finite log_probs detected: {invalid_count}")
                 log_probs_obj = log_probs_obj.masked_fill(invalid_log_probs_obj, 0.0)
                 
         # Compute sim_scale_loss: leverage redundancy to compress scales
@@ -1347,14 +1347,14 @@ class FrameWiseScalePredictor(ModuleUtilsMixin, nn.Module):
             invalid_actions = ~torch.isfinite(raw_actions)
             if invalid_actions.any():
                 bad_samples = torch.nonzero(invalid_actions.any(dim=1), as_tuple=False).flatten().tolist()
-                print(f"[predictor] non-finite actions in samples: {bad_samples}")
+                print(f"[allocator] non-finite actions in samples: {bad_samples}")
                 raw_actions = raw_actions.masked_fill(invalid_actions, 0.0)
 
         if scales is not None:
             invalid_scales = ~torch.isfinite(scales)
             if invalid_scales.any():
                 bad_samples = torch.nonzero(invalid_scales.any(dim=1), as_tuple=False).flatten().tolist()
-                print(f"[predictor] non-finite scales in samples: {bad_samples}")
+                print(f"[allocator] non-finite scales in samples: {bad_samples}")
                 scales = scales.masked_fill(invalid_scales, 1.0)
 
         if eval_mode:
@@ -1367,7 +1367,7 @@ class FrameWiseScalePredictor(ModuleUtilsMixin, nn.Module):
             feat_norm_var_mean = feat_norm_var_sum / max(1, feat_norm_var_count)
             frame_sim_mean = frame_sim_sum / max(1, frame_sim_count)
             print(
-                f"[predictor-debug] gate_entropy_mean={gate_entropy_mean:.6f} "
+                f"[allocator-debug] gate_entropy_mean={gate_entropy_mean:.6f} "
                 f"feat_norm_var_mean={feat_norm_var_mean:.6f} frame_sim_mean={frame_sim_mean:.6f} "
                 f"scale_var_mean={scale_var_mean:.6f}"
             )
@@ -1464,10 +1464,10 @@ class FrameWiseScalePredictor(ModuleUtilsMixin, nn.Module):
         return self._last_scale_diagnostics if self._last_scale_diagnostics is not None else {}
 
 
-class RegressionHeadPredictor(ModuleUtilsMixin, nn.Module):
+class RegressionHeadAllocator(ModuleUtilsMixin, nn.Module):
     """
     Projects text features into vision feature space and delegates scale prediction
-    to `FrameWiseScalePredictor`. Provides a lightweight projector with LayerNorm -> Linear -> GELU -> Linear.
+    to `FrameWiseScaleAllocator`. Provides a lightweight projector with LayerNorm -> Linear -> GELU -> Linear.
     """
     def __init__(self, vision_config):
         super().__init__()
@@ -1535,17 +1535,17 @@ class RegressionHeadPredictor(ModuleUtilsMixin, nn.Module):
 
         self.spatial_merge_size = vision_config.spatial_merge_size
         
-        predictor_arch = str(getattr(vision_config, "predictor_arch", "framewise_v3")).lower()
+        allocator_arch = str(getattr(vision_config, "allocator_arch", "framewise_v3")).lower()
         use_discrete_action = bool(getattr(vision_config, "use_discrete_action", False))
-        if use_discrete_action and predictor_arch == "saliency_share_v1":
-            raise ValueError("`predictor_arch=saliency_share_v1` requires continuous actions.")
-        scorer_cls = FrameWiseScalePredictor
-        if predictor_arch == "saliency_share_v1":
-            from resadapt.allocator.saliency_share_predictor_v3 import SaliencyShareScalePredictor
+        if use_discrete_action and allocator_arch == "saliency_share_v1":
+            raise ValueError("`allocator_arch=saliency_share_v1` requires continuous actions.")
+        scorer_cls = FrameWiseScaleAllocator
+        if allocator_arch == "saliency_share_v1":
+            from resadapt.allocator.saliency_share_allocator_v3 import SaliencyShareScaleAllocator
 
-            scorer_cls = SaliencyShareScalePredictor
-        elif predictor_arch not in {"framewise_v3", "framewise_active_v1", "framewise"}:
-            raise ValueError(f"Unsupported predictor_arch: {predictor_arch}")
+            scorer_cls = SaliencyShareScaleAllocator
+        elif allocator_arch not in {"framewise_v3", "framewise_active_v1", "framewise"}:
+            raise ValueError(f"Unsupported allocator_arch: {allocator_arch}")
 
         self.scorer = scorer_cls(
             dim=output_dim,
@@ -1594,7 +1594,7 @@ class RegressionHeadPredictor(ModuleUtilsMixin, nn.Module):
         compute_frame_metrics: bool = False,  # Whether to compute frame metrics for advantage
     ):
         """
-        Run text projector (if provided) then delegate to `FrameWiseScalePredictor`.
+        Run text projector (if provided) then delegate to `FrameWiseScaleAllocator`.
         Returns (actions, scales, log_probs) from the scorer.
         """
         if text_features is not None:
@@ -1687,7 +1687,7 @@ class RegressionHeadPredictor(ModuleUtilsMixin, nn.Module):
             pre_var_mean = pre_var_sum / max(1, pre_var_count)
             post_var_mean = post_var_sum / max(1, post_var_count)
             print(
-                f"[predictor-debug] vlp_pre_sim_mean={pre_sim_mean:.6f} vlp_pre_var_mean={pre_var_mean:.6f} "
+                f"[allocator-debug] vlp_pre_sim_mean={pre_sim_mean:.6f} vlp_pre_var_mean={pre_var_mean:.6f} "
                 f"vlp_post_sim_mean={post_sim_mean:.6f} vlp_post_var_mean={post_var_mean:.6f}"
             )
 
@@ -1734,12 +1734,12 @@ class RegressionHeadPredictor(ModuleUtilsMixin, nn.Module):
         return self.scorer.get_frame_metrics()
 
 # ============================================================================
-# RegressionHeadPredictorV2: Uses DifferentiableImportancePredictor
+# RegressionHeadAllocatorV2: Uses DifferentiableImportanceAllocator
 # ============================================================================
 
-class RegressionHeadPredictorV2(ModuleUtilsMixin, nn.Module):
+class RegressionHeadAllocatorV2(ModuleUtilsMixin, nn.Module):
     """
-    V2 Predictor using DifferentiableImportancePredictor for improved frame differentiation.
+    V2 Allocator using DifferentiableImportanceAllocator for improved frame differentiation.
     
     Key improvements over V1:
     - Frame Information Encoder (intrinsic info metrics)
@@ -1748,12 +1748,12 @@ class RegressionHeadPredictorV2(ModuleUtilsMixin, nn.Module):
     - Dual-Path Encoder (preserves frame independence)
     - Contrastive Differentiator (forces feature diversity)
     
-    Interface is identical to RegressionHeadPredictor.
+    Interface is identical to RegressionHeadAllocator.
     """
     
     def __init__(self, vision_config):
         super().__init__()
-        from resadapt.allocator.importance_predictor_v2 import DifferentiableImportancePredictor
+        from resadapt.allocator.importance_allocator_v2 import DifferentiableImportanceAllocator
         
         vocab_size = int(getattr(vision_config, "vocab_size"))
         llm_hidden_size = int(getattr(vision_config, "llm_hidden_size"))
@@ -1817,8 +1817,8 @@ class RegressionHeadPredictorV2(ModuleUtilsMixin, nn.Module):
 
         self.spatial_merge_size = vision_config.spatial_merge_size
         
-        # V2: Use DifferentiableImportancePredictor
-        self.scorer = DifferentiableImportancePredictor(
+        # V2: Use DifferentiableImportanceAllocator
+        self.scorer = DifferentiableImportanceAllocator(
             dim=output_dim,
             depth=vision_config.self_depth,
             dim_head=vision_config.dim_head,
@@ -1865,7 +1865,7 @@ class RegressionHeadPredictorV2(ModuleUtilsMixin, nn.Module):
         scale_mask=None,
         compute_frame_metrics: bool = False,  # Whether to compute frame metrics for advantage
     ):
-        """Forward pass - same interface as RegressionHeadPredictor."""
+        """Forward pass - same interface as RegressionHeadAllocator."""
         if text_features is not None:
             if int(text_features.shape[-1]) == self.out_hidden_size:
                 text_out = self.mlp(text_features)
@@ -1971,7 +1971,7 @@ if __name__ == '__main__':
     PATCHES_PER_FRAME = 256
     MAX_TEXT_LEN = 1024
     
-    model = FrameWiseScalePredictor(
+    model = FrameWiseScaleAllocator(
         dim=512,
         depth=2,
         dim_head=64,
@@ -2008,7 +2008,7 @@ if __name__ == '__main__':
     print("\nExample scale factors for the first sample in batch:")
     print(scale_factors[0].detach().cpu().numpy())
     
-    print("\nFrameWiseScalePredictor ran successfully!")
+    print("\nFrameWiseScaleAllocator ran successfully!")
 
     rewards = torch.randn(scale_factors.shape[0], device=device) # Dummy rewards, shape (B,)
 

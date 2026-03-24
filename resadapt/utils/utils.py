@@ -146,26 +146,26 @@ _original_init = Qwen2_5_VLMultiModalProcessor.__init__
 def __init__(self, *args, **kwargs):
     _original_init(self, *args, **kwargs)
 
-    predictor_path = os.getenv("PREDICTOR_PATH", None)
-    print("predictor_path", predictor_path)
+    allocator_path = os.getenv("ALLOCATOR_PATH", None)
+    print("allocator_path", allocator_path)
 
-    if predictor_path is None:
-        # raise ValueError("PREDICTOR_PATH is not set")
-        print("PREDICTOR_PATH is not set, use ENABLE_BASELINE_SCALE.")
+    if allocator_path is None:
+        # raise ValueError("ALLOCATOR_PATH is not set")
+        print("ALLOCATOR_PATH is not set, use ENABLE_BASELINE_SCALE.")
         if os.environ.get("ENABLE_BASELINE_SCALE", None) is None:
             raise ValueError("ENABLE_BASELINE_SCALE is not set")
         
     else:
-        from resadapt.allocator.modeling_predictor import PredictorForConditionalGeneration
-        self.predictor = PredictorForConditionalGeneration.from_pretrained(
-            predictor_path,
+        from resadapt.allocator.modeling_allocator import AllocatorForConditionalGeneration
+        self.allocator = AllocatorForConditionalGeneration.from_pretrained(
+            allocator_path,
             dtype="auto",
             device_map="auto",
             attn_implementation="flash_attention_2",
             trust_remote_code=True,
             ignore_mismatched_sizes=True
         )
-        self.predictor.eval()
+        self.allocator.eval()
 
 
 def _apply_hf_processor_main(
@@ -214,17 +214,17 @@ def _apply_hf_processor_main(
                 # print("after", resized_img)
                 
         else:
-            inputs = self.predictor.processor(
+            inputs = self.allocator.processor(
                 text=[prompt],
                 images=images,
                 videos=videos,
                 padding=True,
                 return_tensors="pt",
-            ).to(self.predictor.device)
+            ).to(self.allocator.device)
             
             inputs.update({"multi_modal_data": [{"image": images, "video": videos}], "text": [prompt], "eval_mode": True})
 
-            scaled_multi_modal_data = self.predictor(**inputs)["multi_modal_data"]
+            scaled_multi_modal_data = self.allocator(**inputs)["multi_modal_data"]
 
             if images is not None:
                 scaled_images = [img.cpu() if img.is_cuda else img for mm_item in scaled_multi_modal_data for img in mm_item["image"]]
@@ -261,16 +261,16 @@ def _apply_hf_processor_main(
 
         # # print("images", images)
         # images = [convert_to_rgb(image) for image in images]
-        # inputs = self.predictor.processor(
+        # inputs = self.allocator.processor(
         #     text=[prompt],
         #     images=images,
         #     videos=videos,
         #     padding=True,
         #     return_tensors="pt",
-        # ).to(self.predictor.device)
+        # ).to(self.allocator.device)
         # inputs.update({"multi_modal_data": [{"image": images}], "text": [prompt], "eval_mode": True})
 
-        # scaled_multi_modal_data = self.predictor(**inputs)["multi_modal_data"]
+        # scaled_multi_modal_data = self.allocator(**inputs)["multi_modal_data"]
         # scaled_images = [img for mm_item in scaled_multi_modal_data for img in mm_item["image"]]
         
         # mm_items = self._to_mm_items({"image": scaled_images})
@@ -1176,7 +1176,7 @@ def process_video_list(
                 flat_chunks.append((processed_frames, chunk_meta))
             structured_chunks.append(rebuilt_group)
 
-        # Align scales with the original predictor layout (per-frame or per-chunk slots).
+        # Align scales with the original allocator layout (per-frame or per-chunk slots).
         # - ``scale_mask_row`` is NOT rewritten in chunk-selection mode: copy the slice for this video
         #   into ``mask_full`` unchanged.
         # - ``full`` starts as the same slice of ``scales_row``, then: (1) force 0 where mask is False
@@ -1611,7 +1611,7 @@ def compute_scales_and_sample_means_cpu(
     if scales_cpu is None:
         actions = out.get("actions", None)
         if actions is None:
-            raise RuntimeError("predictor output missing both 'scales' and 'actions'")
+            raise RuntimeError("allocator output missing both 'scales' and 'actions'")
 
         actions_cpu = _to_cpu_deep(actions)
 

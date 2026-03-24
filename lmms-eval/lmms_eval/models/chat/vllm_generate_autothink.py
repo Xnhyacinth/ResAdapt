@@ -189,8 +189,8 @@ class VLLMGenerateAutoThink(VLLMChat):
         early_exit_thresh: float = 0.97,
         inference_mode: str = "auto",
         log_visual_len: Optional[bool] = None,
-        predictor_max_scale: Optional[float] = None,
-        predictor_min_scale: Optional[float] = None,
+        allocator_max_scale: Optional[float] = None,
+        allocator_min_scale: Optional[float] = None,
         **kwargs,
     ):
         self.system_prompt = COT_SYSTEM_PROMPT_ANSWER_TWICE
@@ -205,7 +205,7 @@ class VLLMGenerateAutoThink(VLLMChat):
             self.log_visual_len = str(log_visual_len).lower() in ("1", "true", "yes", "y", "t")
         else:
             self.log_visual_len = bool(log_visual_len)
-        self.predictor_path = os.getenv("PREDICTOR_PATH", None)
+        self.allocator_path = os.getenv("ALLOCATOR_PATH", None)
         self.enable_baseline_scale = env_true("ENABLE_BASELINE_SCALE")
         self.scale_preprocess_retries = int(os.getenv("SCALE_PREPROCESS_RETRIES", "2"))
         self.scale_preprocess_timeout_s = int(os.getenv("SCALE_PREPROCESS_TIMEOUT_S", "21600"))
@@ -215,52 +215,52 @@ class VLLMGenerateAutoThink(VLLMChat):
         self.max_inflight_per_gpu = int(os.getenv("max_inflight_per_gpu", str(max_inflight_per_gpu)))
         self.max_queue_per_gpu = int(os.getenv("MAX_QUEUE_PER_GPU", str(os.getenv("MAX_QUEUE_PER_GPU", "8"))))
         
-        # Determine if this is the main rank (only rank 0 runs predictor pool)
+        # Determine if this is the main rank (only rank 0 runs allocator pool)
         self._is_main_rank = int(os.getenv("RANK", "0")) == 0
         self._world_size_env = int(os.getenv("WORLD_SIZE", "1"))
         
-        # Pool kwargs for predictor pool initialization
+        # Pool kwargs for allocator pool initialization
         self._pool_kwargs = dict(
-            model_path=self.predictor_path,
-            num_gpus=int(os.getenv("PREDICTOR_NUM_GPUS", "8")),
+            model_path=self.allocator_path,
+            num_gpus=int(os.getenv("ALLOCATOR_NUM_GPUS", "8")),
             enable_batch=True,
             microbatch_ms=int(os.getenv("MICRO_BATCH_MS", "10")),
             microbatch_max=self.micro_batch,
-            max_total_inflight=self.max_inflight_per_gpu * int(os.getenv("PREDICTOR_NUM_GPUS", "8")),
+            max_total_inflight=self.max_inflight_per_gpu * int(os.getenv("ALLOCATOR_NUM_GPUS", "8")),
             max_inflight_per_gpu=self.max_inflight_per_gpu,
             max_queue_per_gpu=self.max_queue_per_gpu,
-            submit_threads=self.workers if self.predictor_path is not None and "smol" not in self.predictor_path else self.workers * 3,
-            max_frames=max_frame_num // 2 if self.predictor_path is not None and "smol" not in self.predictor_path else max_frame_num,
-            schedule_policy=os.getenv("PREDICTOR_SCHED_POLICY", "least_inflight"),
+            submit_threads=self.workers if self.allocator_path is not None and "smol" not in self.allocator_path else self.workers * 3,
+            max_frames=max_frame_num // 2 if self.allocator_path is not None and "smol" not in self.allocator_path else max_frame_num,
+            schedule_policy=os.getenv("ALLOCATOR_SCHED_POLICY", "least_inflight"),
         )
-        if predictor_max_scale is None:
+        if allocator_max_scale is None:
             try:
-                predictor_max_scale = float(os.getenv("PREDICTOR_MAX_SCALE", ""))
+                allocator_max_scale = float(os.getenv("ALLOCATOR_MAX_SCALE", ""))
             except Exception:
-                predictor_max_scale = None
-        if predictor_min_scale is None:
+                allocator_max_scale = None
+        if allocator_min_scale is None:
             try:
-                predictor_min_scale = float(os.getenv("PREDICTOR_MIN_SCALE", ""))
+                allocator_min_scale = float(os.getenv("ALLOCATOR_MIN_SCALE", ""))
             except Exception:
-                predictor_min_scale = None
-        if isinstance(predictor_max_scale, (int, float)):
-            self._pool_kwargs["max_scale"] = float(predictor_max_scale)
-        if isinstance(predictor_min_scale, (int, float)):
-            self._pool_kwargs["min_scale"] = float(predictor_min_scale)
+                allocator_min_scale = None
+        if isinstance(allocator_max_scale, (int, float)):
+            self._pool_kwargs["max_scale"] = float(allocator_max_scale)
+        if isinstance(allocator_min_scale, (int, float)):
+            self._pool_kwargs["min_scale"] = float(allocator_min_scale)
         self.pool = None
         self._scales_missing_max_warn = 5
         self.scale_preprocess_failures: List[Tuple[str, str]] = []
-        self._predictor_scales_cache_base: Optional[str] = None
-        self._predictor_scales_cache_loaded: Dict[str, bool] = {}
-        self._predictor_scales_cache_mem: Dict[str, Dict[str, Dict[str, Any]]] = {}
-        self._predictor_scales_cache_frames = int(self._pool_kwargs.get("max_frames", max_frame_num))
-        if self.predictor_path is not None:
+        self._allocator_scales_cache_base: Optional[str] = None
+        self._allocator_scales_cache_loaded: Dict[str, bool] = {}
+        self._allocator_scales_cache_mem: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self._allocator_scales_cache_frames = int(self._pool_kwargs.get("max_frames", max_frame_num))
+        if self.allocator_path is not None:
             try:
-                expanded = os.path.expanduser(self.predictor_path)
+                expanded = os.path.expanduser(self.allocator_path)
                 if os.path.isdir(expanded):
-                    self._predictor_scales_cache_base = os.path.join(expanded, "benchmarks")
+                    self._allocator_scales_cache_base = os.path.join(expanded, "benchmarks")
             except Exception:
-                self._predictor_scales_cache_base = None
+                self._allocator_scales_cache_base = None
 
         super().__init__(
             model,
@@ -285,24 +285,24 @@ class VLLMGenerateAutoThink(VLLMChat):
         self.patch_size = self.processor.image_processor.patch_size
         self.image_factor = self.processor.video_processor.merge_size * self.patch_size
 
-        # Only rank 0 starts predictor pool to avoid GPU competition
-        if self._is_main_rank and (self.predictor_path is not None or self.enable_baseline_scale):
-            print(f"[VLLMGenerateAutoThink] [Rank 0] Found predictor at {self.predictor_path}")
+        # Only rank 0 starts allocator pool to avoid GPU competition
+        if self._is_main_rank and (self.allocator_path is not None or self.enable_baseline_scale):
+            print(f"[VLLMGenerateAutoThink] [Rank 0] Found allocator at {self.allocator_path}")
             if self._check_gpu_available():
                 try:
                     from resadapt.eval.multi_model_limit_async import MultiGPUInferPool
                     self.pool = MultiGPUInferPool(**self._pool_kwargs)
                     self.pool.start()
-                    print("[VLLMGenerateAutoThink] [Rank 0] Predictor pool started successfully")
+                    print("[VLLMGenerateAutoThink] [Rank 0] Allocator pool started successfully")
                 except Exception as e:
-                    print(f"[VLLMGenerateAutoThink] [Rank 0] Warning: Failed to start predictor pool: {e}")
+                    print(f"[VLLMGenerateAutoThink] [Rank 0] Warning: Failed to start allocator pool: {e}")
                     import traceback
                     traceback.print_exc()
                     self.pool = None
             else:
-                print("[VLLMGenerateAutoThink] [Rank 0] Warning: GPU not available, skipping predictor pool")
-        elif not self._is_main_rank and self.predictor_path is not None:
-            print(f"[VLLMGenerateAutoThink] [Rank {os.getenv('RANK', '?')}] Waiting for rank 0 to run predictor")
+                print("[VLLMGenerateAutoThink] [Rank 0] Warning: GPU not available, skipping allocator pool")
+        elif not self._is_main_rank and self.allocator_path is not None:
+            print(f"[VLLMGenerateAutoThink] [Rank {os.getenv('RANK', '?')}] Waiting for rank 0 to run allocator")
 
     def _sanitize_benchmark_name(self, name: str) -> str:
         name = str(name)
@@ -335,7 +335,7 @@ class VLLMGenerateAutoThink(VLLMChat):
         s = f"{fv:.6f}".rstrip("0").rstrip(".")
         return s if s else None
 
-    def _predictor_scales_cache_file_tag(self) -> str:
+    def _allocator_scales_cache_file_tag(self) -> str:
         min_s = self._format_scale_for_cache(self._pool_kwargs.get("min_scale", None))
         max_s = self._format_scale_for_cache(self._pool_kwargs.get("max_scale", None))
         tag = ""
@@ -345,9 +345,9 @@ class VLLMGenerateAutoThink(VLLMChat):
             tag += f"_max{max_s}"
         return tag
 
-    def _predictor_scales_cache_key(self, benchmark: str) -> str:
+    def _allocator_scales_cache_key(self, benchmark: str) -> str:
         bench = self._sanitize_benchmark_name(benchmark)
-        return f"{bench}::frames{self._predictor_scales_cache_frames}{self._predictor_scales_cache_file_tag()}"
+        return f"{bench}::frames{self._allocator_scales_cache_frames}{self._allocator_scales_cache_file_tag()}"
 
     def _scale_entry_jsonable(self, entry: Dict[str, Any]) -> Dict[str, Any]:
         def _to_jsonable(obj: Any) -> Any:
@@ -406,15 +406,15 @@ class VLLMGenerateAutoThink(VLLMChat):
             "scales": scales,
         }
 
-    def _load_predictor_scales_cache(self, benchmark: str) -> Dict[str, Dict[str, Any]]:
-        if self._predictor_scales_cache_base is None:
+    def _load_allocator_scales_cache(self, benchmark: str) -> Dict[str, Dict[str, Any]]:
+        if self._allocator_scales_cache_base is None:
             return {}
-        cache_key = self._predictor_scales_cache_key(benchmark)
-        if self._predictor_scales_cache_loaded.get(cache_key, False):
-            return self._predictor_scales_cache_mem.get(cache_key, {})
+        cache_key = self._allocator_scales_cache_key(benchmark)
+        if self._allocator_scales_cache_loaded.get(cache_key, False):
+            return self._allocator_scales_cache_mem.get(cache_key, {})
         cache: Dict[str, Dict[str, Any]] = {}
         try:
-            tag = self._predictor_scales_cache_file_tag()
+            tag = self._allocator_scales_cache_file_tag()
             candidates = [str(benchmark)]
             if not str(benchmark).endswith("_boxed"):
                 candidates.append(str(benchmark) + "_boxed")
@@ -422,8 +422,8 @@ class VLLMGenerateAutoThink(VLLMChat):
             found_any = False
             for cand in candidates:
                 bench = self._sanitize_benchmark_name(cand)
-                bench_dir = os.path.join(self._predictor_scales_cache_base, bench)
-                cache_file = os.path.join(bench_dir, f"scales_{self._predictor_scales_cache_frames}{tag}.jsonl")
+                bench_dir = os.path.join(self._allocator_scales_cache_base, bench)
+                cache_file = os.path.join(bench_dir, f"scales_{self._allocator_scales_cache_frames}{tag}.jsonl")
                 if not os.path.exists(cache_file):
                     continue
                 found_any = True
@@ -446,28 +446,28 @@ class VLLMGenerateAutoThink(VLLMChat):
 
             if not found_any:
                 bench = self._sanitize_benchmark_name(benchmark)
-                bench_dir = os.path.join(self._predictor_scales_cache_base, bench)
-                cache_file = os.path.join(bench_dir, f"scales_{self._predictor_scales_cache_frames}{tag}.jsonl")
-                print(f"[VLLMGenerateAutoThink] No predictor scales cache for task={benchmark} frames={self._predictor_scales_cache_frames}: {cache_file}")
+                bench_dir = os.path.join(self._allocator_scales_cache_base, bench)
+                cache_file = os.path.join(bench_dir, f"scales_{self._allocator_scales_cache_frames}{tag}.jsonl")
+                print(f"[VLLMGenerateAutoThink] No allocator scales cache for task={benchmark} frames={self._allocator_scales_cache_frames}: {cache_file}")
         except Exception:
             cache = {}
-        self._predictor_scales_cache_mem[cache_key] = cache
-        self._predictor_scales_cache_loaded[cache_key] = True
+        self._allocator_scales_cache_mem[cache_key] = cache
+        self._allocator_scales_cache_loaded[cache_key] = True
         return cache
 
-    def _append_predictor_scales_cache(self, benchmark: str, entries: Dict[str, Dict[str, Any]]) -> None:
-        if self._predictor_scales_cache_base is None:
+    def _append_allocator_scales_cache(self, benchmark: str, entries: Dict[str, Dict[str, Any]]) -> None:
+        if self._allocator_scales_cache_base is None:
             return
         if not entries:
             return
         bench = self._sanitize_benchmark_name(benchmark)
-        bench_dir = os.path.join(self._predictor_scales_cache_base, bench)
+        bench_dir = os.path.join(self._allocator_scales_cache_base, bench)
         os.makedirs(bench_dir, exist_ok=True)
         cache_file = os.path.join(
             bench_dir,
-            f"scales_{self._predictor_scales_cache_frames}{self._predictor_scales_cache_file_tag()}.jsonl",
+            f"scales_{self._allocator_scales_cache_frames}{self._allocator_scales_cache_file_tag()}.jsonl",
         )
-        cache_mem = self._load_predictor_scales_cache(bench)
+        cache_mem = self._load_allocator_scales_cache(bench)
         try:
             with open(cache_file, "a", encoding="utf-8") as f:
                 for key, entry in entries.items():
@@ -484,7 +484,7 @@ class VLLMGenerateAutoThink(VLLMChat):
             return
 
     def _get_scales_with_disk_cache(self, payloads: List[dict], keys: List[str]) -> Dict[str, Dict[str, Any]]:
-        if self.predictor_path is None or self._predictor_scales_cache_base is None or not keys:
+        if self.allocator_path is None or self._allocator_scales_cache_base is None or not keys:
             return self._submit_payloads_with_retries(payloads, keys)
         cached: Dict[str, Dict[str, Any]] = {}
         missing_payloads: List[dict] = []
@@ -501,7 +501,7 @@ class VLLMGenerateAutoThink(VLLMChat):
                 continue
             cache_task = self._normalize_benchmark_for_cache(task)
             cache_key = self._normalize_compound_key_for_cache(key)
-            cache = self._load_predictor_scales_cache(cache_task)
+            cache = self._load_allocator_scales_cache(cache_task)
             hit = cache.get(cache_key, None)
             if isinstance(hit, dict) and hit.get("scales", None) is not None:
                 cached[key] = hit
@@ -522,7 +522,7 @@ class VLLMGenerateAutoThink(VLLMChat):
                 cache_key = self._normalize_compound_key_for_cache(key)
                 by_task.setdefault(cache_task, {})[cache_key] = entry
             for task, task_entries in by_task.items():
-                self._append_predictor_scales_cache(task, task_entries)
+                self._append_allocator_scales_cache(task, task_entries)
         out = dict(cached)
         out.update(predicted)
         return out
@@ -603,7 +603,7 @@ class VLLMGenerateAutoThink(VLLMChat):
             gc.collect()
             torch.cuda.empty_cache()
 
-    def _unload_predictor(self):
+    def _unload_allocator(self):
         if self.pool is not None:
             try:
                 self.pool.close()
@@ -671,10 +671,10 @@ class VLLMGenerateAutoThink(VLLMChat):
             init_kwargs = self._vllm_client_init
         self.client = LLM(**init_kwargs)
 
-    def _ensure_predictor_pool(self):
+    def _ensure_allocator_pool(self):
         if self.pool is not None:
             return
-        if self.predictor_path is None and not self.enable_baseline_scale:
+        if self.allocator_path is None and not self.enable_baseline_scale:
             return
         try:
             from resadapt.eval.multi_model_limit_async import MultiGPUInferPool
@@ -822,7 +822,7 @@ class VLLMGenerateAutoThink(VLLMChat):
     
     def _submit_payloads_with_retries(self, payloads: List[dict], keys: List[str]) -> Dict[str, Dict[str, Any]]:
         """Submit payloads to pool with retries, returning results dict."""
-        self._ensure_predictor_pool()
+        self._ensure_allocator_pool()
         if self.pool is None:
             return {k: default_scale_entry() for k in keys}
 
@@ -894,7 +894,7 @@ class VLLMGenerateAutoThink(VLLMChat):
         return results
 
     def _batch_scale_preprocess(self, requests: List[Instance]) -> Dict[str, Dict[str, Any]]:
-        if self.predictor_path is None and not self.enable_baseline_scale:
+        if self.allocator_path is None and not self.enable_baseline_scale:
             return {self.make_compound_key_from_req(req): default_scale_entry() for req in requests}
         
         payloads: List[dict] = []
@@ -1017,8 +1017,8 @@ class VLLMGenerateAutoThink(VLLMChat):
             else:
                 video_inputs = None
                 video_metadatas = None
-        elif self.predictor_path is not None:
-            # Predictor enabled but scales missing: keep original media
+        elif self.allocator_path is not None:
+            # Allocator enabled but scales missing: keep original media
             compound_key = f"{task}::{doc_id}"
             print(f"[VLLMGenerateAutoThink] WARNING: scales missing for request {compound_key}, keeping original media")
         text = self.processor.apply_chat_template(
@@ -1285,7 +1285,7 @@ class VLLMGenerateAutoThink(VLLMChat):
         res, requests = self.get_response_from_cache(requests)
         pbar = tqdm(total=len(requests), disable=(self.rank != 0), desc="Model Responding")
 
-        use_scale = self.predictor_path is not None or self.enable_baseline_scale
+        use_scale = self.allocator_path is not None or self.enable_baseline_scale
         scale_preprocess_s = 0.0
         all_scales_dict: Dict[str, Dict[str, Any]] = {}
         
@@ -1296,10 +1296,10 @@ class VLLMGenerateAutoThink(VLLMChat):
         except Exception:
             dist_available = False
         
-        # Only process scales if predictor is enabled
+        # Only process scales if allocator is enabled
         if len(requests) > 0 and use_scale:
             if self._is_main_rank:
-                # Rank 0: Gather requests from all ranks, run predictor pool, and broadcast scales
+                # Rank 0: Gather requests from all ranks, run allocator pool, and broadcast scales
                 self._unload_vllm()
                 
                 # 1. Gather all requests (payloads only, to strictly avoid pickling issues)
@@ -1337,7 +1337,7 @@ class VLLMGenerateAutoThink(VLLMChat):
                     all_payloads = local_payloads
                     all_keys = local_keys
 
-                # 2. Run predictor pool on all gathered payloads
+                # 2. Run allocator pool on all gathered payloads
                 try:
                     t0 = time.time()
                     all_scales_dict = self._get_scales_with_disk_cache(all_payloads, all_keys)
@@ -1349,8 +1349,8 @@ class VLLMGenerateAutoThink(VLLMChat):
                     traceback.print_exc()
                     all_scales_dict = {k: default_scale_entry() for k in all_keys}
                 
-                # Unload predictor pool to free memory before vLLM generation
-                self._unload_predictor()
+                # Unload allocator pool to free memory before vLLM generation
+                self._unload_allocator()
                 
                 # Convert tensors to CPU-serializable format for broadcast
                 all_scales_dict = self._scales_dict_to_cpu(all_scales_dict)
@@ -1492,7 +1492,7 @@ class VLLMGenerateAutoThink(VLLMChat):
                     scale_entry = scales_dict.get(key, default_scale_entry())
                     req.scale_stats = self._scale_entry_stats(scale_entry)
                     req.scales = self._normalize_scales(scale_entry.get("scales", None))
-                    req.has_predictor_scale = scale_entry.get("scales", None) is not None
+                    req.has_allocator_scale = scale_entry.get("scales", None) is not None
 
             assert len(response_text) == len(batch_requests)
             res.extend(response_text)

@@ -75,9 +75,9 @@ def _parse_optional_choice(value: Any, env_name: str, allowed: Tuple[str, ...]) 
     return value
 
 
-def _strip_custom_predictor_engine_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
-    """Remove predictor-only controls before forwarding kwargs into vLLM."""
-    return {key: value for key, value in dict(kwargs).items() if not str(key).startswith("predictor_")}
+def _strip_custom_allocator_engine_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove allocator-only controls before forwarding kwargs into vLLM."""
+    return {key: value for key, value in dict(kwargs).items() if not str(key).startswith("allocator_")}
 
 def default_scale_entry() -> Dict[str, Any]:
     """Return a fresh default entry each time to avoid shared-mutation bugs."""
@@ -200,13 +200,13 @@ def _masked_scale_stats(scales: Any, scale_mask: Any) -> Optional[Tuple[float, f
 
 
 def _compute_effective_scale_mean(scales: Any, scale_mask: Any, fallback: float = 1.0) -> float:
-    """Fair mean comparable to the predictor: use ``scale_mask`` (unchanged in chunk-selection).
+    """Fair mean comparable to the allocator: use ``scale_mask`` (unchanged in chunk-selection).
 
     Where ``scale_mask`` is False, treat scale as 0. Mean is ``sum(s * m) / sum(m)`` over the
     aligned vector (same rule as masking padding to 0 before averaging). Chunk selection does not
     rewrite the mask; it updates ``scales`` only:
     - dropped indices -> 0
-    - selected indices -> keep predictor scale when resized, or 1.0 when ``noresize``
+    - selected indices -> keep allocator scale when resized, or 1.0 when ``noresize``
     """
     if scales is None:
         return float(fallback)
@@ -315,17 +315,17 @@ class VLLMGenerateCustom(VLLMChat):
         fps: Optional[int] = None,
         nframes: Optional[int] = 32,
         log_visual_len: Optional[bool] = None,
-        predictor_max_scale: Optional[float] = None,
-        predictor_min_scale: Optional[float] = None,
-        predictor_keep_chunk_threshold: Optional[float] = None,
-        predictor_keep_topk_chunks: Optional[int] = None,
-        predictor_resize_kept_chunks: Optional[bool] = None,
-        predictor_topk_selector: Optional[str] = None,
-        predictor_topk_unit: Optional[str] = None,
+        allocator_max_scale: Optional[float] = None,
+        allocator_min_scale: Optional[float] = None,
+        allocator_keep_chunk_threshold: Optional[float] = None,
+        allocator_keep_topk_chunks: Optional[int] = None,
+        allocator_resize_kept_chunks: Optional[bool] = None,
+        allocator_topk_selector: Optional[str] = None,
+        allocator_topk_unit: Optional[str] = None,
         **kwargs,
     ):
-        kwargs = _strip_custom_predictor_engine_kwargs(kwargs)
-        self.predictor_path = os.getenv("PREDICTOR_PATH", None)
+        kwargs = _strip_custom_allocator_engine_kwargs(kwargs)
+        self.allocator_path = os.getenv("ALLOCATOR_PATH", None)
         self.enable_baseline_scale = env_true("ENABLE_BASELINE_SCALE")
         if log_visual_len is None:
             self.log_visual_len = env_true("LOG_VISUAL_LEN")
@@ -339,24 +339,24 @@ class VLLMGenerateCustom(VLLMChat):
             self.baseline_scale_factor = float(os.getenv("BASELINE_SCALE_FACTOR", "1.0"))
         except Exception:
             self.baseline_scale_factor = 1.0
-        self.predictor_keep_chunk_threshold = _parse_optional_float(
-            predictor_keep_chunk_threshold, "PREDICTOR_KEEP_CHUNK_THRESHOLD"
+        self.allocator_keep_chunk_threshold = _parse_optional_float(
+            allocator_keep_chunk_threshold, "ALLOCATOR_KEEP_CHUNK_THRESHOLD"
         )
-        self.predictor_keep_topk_chunks = _parse_optional_int(
-            predictor_keep_topk_chunks, "PREDICTOR_KEEP_TOPK_CHUNKS"
+        self.allocator_keep_topk_chunks = _parse_optional_int(
+            allocator_keep_topk_chunks, "ALLOCATOR_KEEP_TOPK_CHUNKS"
         )
-        self.predictor_resize_kept_chunks = _parse_optional_bool(
-            predictor_resize_kept_chunks, "PREDICTOR_RESIZE_KEPT_CHUNKS", default=True
+        self.allocator_resize_kept_chunks = _parse_optional_bool(
+            allocator_resize_kept_chunks, "ALLOCATOR_RESIZE_KEPT_CHUNKS", default=True
         )
-        self.predictor_topk_selector = _parse_optional_choice(
-            predictor_topk_selector, "PREDICTOR_TOPK_SELECTOR", ("greedy", "pass")
+        self.allocator_topk_selector = _parse_optional_choice(
+            allocator_topk_selector, "ALLOCATOR_TOPK_SELECTOR", ("greedy", "pass")
         )
-        self.predictor_topk_unit = _parse_optional_choice(
-            predictor_topk_unit, "PREDICTOR_TOPK_UNIT", ("auto", "frame", "chunk")
+        self.allocator_topk_unit = _parse_optional_choice(
+            allocator_topk_unit, "ALLOCATOR_TOPK_UNIT", ("auto", "frame", "chunk")
         )
-        if self.predictor_keep_chunk_threshold is not None and self.predictor_keep_topk_chunks is not None:
+        if self.allocator_keep_chunk_threshold is not None and self.allocator_keep_topk_chunks is not None:
             raise ValueError(
-                "predictor_keep_chunk_threshold and predictor_keep_topk_chunks are mutually exclusive"
+                "allocator_keep_chunk_threshold and allocator_keep_topk_chunks are mutually exclusive"
             )
         self.add_sys = env_true("ADD_SYS")
         self.scale_preprocess_retries = int(os.getenv("SCALE_PREPROCESS_RETRIES", "2"))
@@ -367,62 +367,62 @@ class VLLMGenerateCustom(VLLMChat):
         self.max_inflight_per_gpu = int(os.getenv("max_inflight_per_gpu", str(max_inflight_per_gpu)))
         self.max_queue_per_gpu = int(os.getenv("MAX_QUEUE_PER_GPU", str(os.getenv("MAX_QUEUE_PER_GPU", "8"))))
 
-        # Determine if this is the main rank (only rank 0 runs predictor pool)
+        # Determine if this is the main rank (only rank 0 runs allocator pool)
         self._is_main_rank = int(os.getenv("RANK", "0")) == 0
         self._world_size_env = int(os.getenv("WORLD_SIZE", "1"))
 
-        # Pool kwargs for predictor pool initialization
+        # Pool kwargs for allocator pool initialization
         self._pool_kwargs = dict(
-            model_path=self.predictor_path,
-            num_gpus=int(os.getenv("PREDICTOR_NUM_GPUS", "8")),
+            model_path=self.allocator_path,
+            num_gpus=int(os.getenv("ALLOCATOR_NUM_GPUS", "8")),
             enable_batch=True,
             microbatch_ms=int(os.getenv("MICRO_BATCH_MS", "10")),
             microbatch_max=self.micro_batch,
-            max_total_inflight=self.max_inflight_per_gpu * int(os.getenv("PREDICTOR_NUM_GPUS", "8")),
+            max_total_inflight=self.max_inflight_per_gpu * int(os.getenv("ALLOCATOR_NUM_GPUS", "8")),
             max_inflight_per_gpu=self.max_inflight_per_gpu,
             max_queue_per_gpu=self.max_queue_per_gpu,
-            submit_threads=self.workers if self.predictor_path is not None and "smol" not in self.predictor_path else self.workers * 3,
-            max_frames=max_frame_num // 2 if self.predictor_path is not None and "smol" not in self.predictor_path else max_frame_num,
-            schedule_policy=os.getenv("PREDICTOR_SCHED_POLICY", "least_inflight"),
+            submit_threads=self.workers if self.allocator_path is not None and "smol" not in self.allocator_path else self.workers * 3,
+            max_frames=max_frame_num // 2 if self.allocator_path is not None and "smol" not in self.allocator_path else max_frame_num,
+            schedule_policy=os.getenv("ALLOCATOR_SCHED_POLICY", "least_inflight"),
         )
-        if predictor_max_scale is None:
+        if allocator_max_scale is None:
             try:
-                predictor_max_scale = float(os.getenv("PREDICTOR_MAX_SCALE", ""))
+                allocator_max_scale = float(os.getenv("ALLOCATOR_MAX_SCALE", ""))
             except Exception:
-                predictor_max_scale = None
-        if predictor_min_scale is None:
+                allocator_max_scale = None
+        if allocator_min_scale is None:
             try:
-                predictor_min_scale = float(os.getenv("PREDICTOR_MIN_SCALE", ""))
+                allocator_min_scale = float(os.getenv("ALLOCATOR_MIN_SCALE", ""))
             except Exception:
-                predictor_min_scale = None
-        if isinstance(predictor_max_scale, (int, float)):
-            self._pool_kwargs["max_scale"] = float(predictor_max_scale)
-        if isinstance(predictor_min_scale, (int, float)):
-            self._pool_kwargs["min_scale"] = float(predictor_min_scale)
+                allocator_min_scale = None
+        if isinstance(allocator_max_scale, (int, float)):
+            self._pool_kwargs["max_scale"] = float(allocator_max_scale)
+        if isinstance(allocator_min_scale, (int, float)):
+            self._pool_kwargs["min_scale"] = float(allocator_min_scale)
         self.pool = None
         self.scale_preprocess_failures: List[Tuple[str, str]] = []
-        self._predictor_scales_cache_base: Optional[str] = None
-        self._predictor_scales_cache_loaded: Dict[str, bool] = {}
-        self._predictor_scales_cache_mem: Dict[str, Dict[str, Dict[str, Any]]] = {}
-        self._predictor_scales_cache_frames = int(self._pool_kwargs.get("max_frames", max_frame_num))
-        if self.predictor_path is not None:
+        self._allocator_scales_cache_base: Optional[str] = None
+        self._allocator_scales_cache_loaded: Dict[str, bool] = {}
+        self._allocator_scales_cache_mem: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self._allocator_scales_cache_frames = int(self._pool_kwargs.get("max_frames", max_frame_num))
+        if self.allocator_path is not None:
             try:
-                expanded = os.path.expanduser(self.predictor_path)
+                expanded = os.path.expanduser(self.allocator_path)
                 if os.path.isdir(expanded):
-                    self._predictor_scales_cache_base = os.path.join(expanded, "benchmarks")
+                    self._allocator_scales_cache_base = os.path.join(expanded, "benchmarks")
             except Exception:
-                self._predictor_scales_cache_base = None
+                self._allocator_scales_cache_base = None
 
-        # Only rank 0 starts predictor pool to avoid GPU competition
-        if self._is_main_rank and self.predictor_path is not None:
-            print(f"[VLLMGenerateCustom] [Rank 0] Found predictor at {self.predictor_path}")
+        # Only rank 0 starts allocator pool to avoid GPU competition
+        if self._is_main_rank and self.allocator_path is not None:
+            print(f"[VLLMGenerateCustom] [Rank 0] Found allocator at {self.allocator_path}")
             
             # Check GPU availability before starting pool
             if self._check_gpu_available():
                 try:
                     from resadapt.eval.multi_model_limit_async import MultiGPUInferPool
                     print(
-                        "[VLLMGenerateCustom] [Rank 0] Predictor pool config: "
+                        "[VLLMGenerateCustom] [Rank 0] Allocator pool config: "
                         f"num_gpus={self._pool_kwargs.get('num_gpus')} "
                         f"microbatch_max={self._pool_kwargs.get('microbatch_max')} "
                         f"max_inflight_per_gpu={self._pool_kwargs.get('max_inflight_per_gpu')} "
@@ -432,16 +432,16 @@ class VLLMGenerateCustom(VLLMChat):
                     )
                     self.pool = MultiGPUInferPool(**self._pool_kwargs)
                     self.pool.start()
-                    print("[VLLMGenerateCustom] [Rank 0] Predictor pool started successfully")
+                    print("[VLLMGenerateCustom] [Rank 0] Allocator pool started successfully")
                 except Exception as e:
-                    print(f"[VLLMGenerateCustom] [Rank 0] Warning: Failed to start predictor pool: {e}")
+                    print(f"[VLLMGenerateCustom] [Rank 0] Warning: Failed to start allocator pool: {e}")
                     import traceback
                     traceback.print_exc()
                     self.pool = None
             else:
-                print("[VLLMGenerateCustom] [Rank 0] Warning: GPU not available, skipping predictor pool")
-        elif not self._is_main_rank and self.predictor_path is not None:
-            print(f"[VLLMGenerateCustom] [Rank {os.getenv('RANK', '?')}] Waiting for rank 0 to run predictor")
+                print("[VLLMGenerateCustom] [Rank 0] Warning: GPU not available, skipping allocator pool")
+        elif not self._is_main_rank and self.allocator_path is not None:
+            print(f"[VLLMGenerateCustom] [Rank {os.getenv('RANK', '?')}] Waiting for rank 0 to run allocator")
 
         super().__init__(
             model,
@@ -460,7 +460,7 @@ class VLLMGenerateCustom(VLLMChat):
         )
 
         if hasattr(self, "_vllm_client_init") and isinstance(self._vllm_client_init, dict):
-            self._vllm_client_init = _strip_custom_predictor_engine_kwargs(self._vllm_client_init)
+            self._vllm_client_init = _strip_custom_allocator_engine_kwargs(self._vllm_client_init)
 
         self.processor = AutoProcessor.from_pretrained(model)
         if self.chat_template is not None:
@@ -488,7 +488,7 @@ class VLLMGenerateCustom(VLLMChat):
         s = f"{fv:.6f}".rstrip("0").rstrip(".")
         return s if s else None
 
-    def _predictor_scales_cache_file_tag(self) -> str:
+    def _allocator_scales_cache_file_tag(self) -> str:
         min_s = self._format_scale_for_cache(self._pool_kwargs.get("min_scale", None))
         max_s = self._format_scale_for_cache(self._pool_kwargs.get("max_scale", None))
         tag = ""
@@ -498,9 +498,9 @@ class VLLMGenerateCustom(VLLMChat):
             tag += f"_max{max_s}"
         return tag
 
-    def _predictor_scales_cache_key(self, benchmark: str) -> str:
+    def _allocator_scales_cache_key(self, benchmark: str) -> str:
         bench = self._sanitize_benchmark_name(benchmark)
-        return f"{bench}::frames{self._predictor_scales_cache_frames}{self._predictor_scales_cache_file_tag()}"
+        return f"{bench}::frames{self._allocator_scales_cache_frames}{self._allocator_scales_cache_file_tag()}"
 
     def _scale_entry_jsonable(self, entry: Dict[str, Any]) -> Dict[str, Any]:
         def _to_jsonable(obj: Any) -> Any:
@@ -559,22 +559,22 @@ class VLLMGenerateCustom(VLLMChat):
             "scales": scales,
         }
 
-    def _load_predictor_scales_cache(self, benchmark: str) -> Dict[str, Dict[str, Any]]:
-        if self._predictor_scales_cache_base is None:
+    def _load_allocator_scales_cache(self, benchmark: str) -> Dict[str, Dict[str, Any]]:
+        if self._allocator_scales_cache_base is None:
             return {}
-        cache_key = self._predictor_scales_cache_key(benchmark)
-        if self._predictor_scales_cache_loaded.get(cache_key, False):
-            return self._predictor_scales_cache_mem.get(cache_key, {})
+        cache_key = self._allocator_scales_cache_key(benchmark)
+        if self._allocator_scales_cache_loaded.get(cache_key, False):
+            return self._allocator_scales_cache_mem.get(cache_key, {})
         cache: Dict[str, Dict[str, Any]] = {}
         try:
             bench = self._sanitize_benchmark_name(benchmark)
-            bench_dir = os.path.join(self._predictor_scales_cache_base, bench)
+            bench_dir = os.path.join(self._allocator_scales_cache_base, bench)
             cache_file = os.path.join(
                 bench_dir,
-                f"scales_{self._predictor_scales_cache_frames}{self._predictor_scales_cache_file_tag()}.jsonl",
+                f"scales_{self._allocator_scales_cache_frames}{self._allocator_scales_cache_file_tag()}.jsonl",
             )
             if not os.path.exists(cache_file):
-                print(f"[VLLMGenerateCustom] No predictor scales cache for task={benchmark} frames={self._predictor_scales_cache_frames}: {cache_file}")
+                print(f"[VLLMGenerateCustom] No allocator scales cache for task={benchmark} frames={self._allocator_scales_cache_frames}: {cache_file}")
             if os.path.exists(cache_file):
                 with open(cache_file, "r", encoding="utf-8") as f:
                     for line in f:
@@ -594,23 +594,23 @@ class VLLMGenerateCustom(VLLMChat):
                         cache[key] = self._cache_entry_to_runtime_entry(entry)
         except Exception:
             cache = {}
-        self._predictor_scales_cache_mem[cache_key] = cache
-        self._predictor_scales_cache_loaded[cache_key] = True
+        self._allocator_scales_cache_mem[cache_key] = cache
+        self._allocator_scales_cache_loaded[cache_key] = True
         return cache
 
-    def _append_predictor_scales_cache(self, benchmark: str, entries: Dict[str, Dict[str, Any]]) -> None:
-        if self._predictor_scales_cache_base is None:
+    def _append_allocator_scales_cache(self, benchmark: str, entries: Dict[str, Dict[str, Any]]) -> None:
+        if self._allocator_scales_cache_base is None:
             return
         if not entries:
             return
         bench = self._sanitize_benchmark_name(benchmark)
-        bench_dir = os.path.join(self._predictor_scales_cache_base, bench)
+        bench_dir = os.path.join(self._allocator_scales_cache_base, bench)
         os.makedirs(bench_dir, exist_ok=True)
         cache_file = os.path.join(
             bench_dir,
-            f"scales_{self._predictor_scales_cache_frames}{self._predictor_scales_cache_file_tag()}.jsonl",
+            f"scales_{self._allocator_scales_cache_frames}{self._allocator_scales_cache_file_tag()}.jsonl",
         )
-        cache_mem = self._load_predictor_scales_cache(bench)
+        cache_mem = self._load_allocator_scales_cache(bench)
         try:
             with open(cache_file, "a", encoding="utf-8") as f:
                 for key, entry in entries.items():
@@ -627,7 +627,7 @@ class VLLMGenerateCustom(VLLMChat):
             return
 
     def _get_scales_with_disk_cache(self, payloads: List[dict], keys: List[str]) -> Dict[str, Dict[str, Any]]:
-        if self.predictor_path is None or self._predictor_scales_cache_base is None or not keys:
+        if self.allocator_path is None or self._allocator_scales_cache_base is None or not keys:
             return self._submit_payloads_with_retries(payloads, keys)
         cached: Dict[str, Dict[str, Any]] = {}
         missing_payloads: List[dict] = []
@@ -642,7 +642,7 @@ class VLLMGenerateCustom(VLLMChat):
                 missing_payloads.append(payload)
                 missing_keys.append(key)
                 continue
-            cache = self._load_predictor_scales_cache(task)
+            cache = self._load_allocator_scales_cache(task)
             hit = cache.get(key, None)
             if isinstance(hit, dict) and hit.get("scales", None) is not None:
                 cached[key] = hit
@@ -661,7 +661,7 @@ class VLLMGenerateCustom(VLLMChat):
                     continue
                 by_task.setdefault(task, {})[key] = entry
             for task, task_entries in by_task.items():
-                self._append_predictor_scales_cache(task, task_entries)
+                self._append_allocator_scales_cache(task, task_entries)
         out = dict(cached)
         out.update(predicted)
         return out
@@ -714,10 +714,10 @@ class VLLMGenerateCustom(VLLMChat):
             gc.collect()
             torch.cuda.empty_cache()
 
-    def _unload_predictor(self):
-        """Forcefully stop predictor pool to free GPU memory."""
+    def _unload_allocator(self):
+        """Forcefully stop allocator pool to free GPU memory."""
         if self.pool is not None:
-            print("[VLLMGenerateCustom] 🧹 Stopping Predictor Pool...")
+            print("[VLLMGenerateCustom] 🧹 Stopping Allocator Pool...")
             try:
                 self.pool.close()
             except Exception as e:
@@ -770,27 +770,27 @@ class VLLMGenerateCustom(VLLMChat):
             else:
                 init_kwargs = self._vllm_client_init
 
-            init_kwargs = _strip_custom_predictor_engine_kwargs(init_kwargs)
+            init_kwargs = _strip_custom_allocator_engine_kwargs(init_kwargs)
             self.client = LLM(**init_kwargs)
             print("[VLLMGenerateCustom] ✅ VLLM Client ready.")
         except Exception as e:
             raise RuntimeError(f"Failed to initialize VLLM: {e}")
 
-    def _ensure_predictor_pool(self):
-        """Initialize predictor pool if needed."""
+    def _ensure_allocator_pool(self):
+        """Initialize allocator pool if needed."""
         if self.pool is not None:
             return
-        if self.predictor_path is None:
+        if self.allocator_path is None:
             return
 
-        print(f"[VLLMGenerateCustom] 🚀 Initializing Predictor Pool (Model: {self.predictor_path})...")
+        print(f"[VLLMGenerateCustom] 🚀 Initializing Allocator Pool (Model: {self.allocator_path})...")
         try:
             from resadapt.eval.multi_model_limit_async import MultiGPUInferPool
             self.pool = MultiGPUInferPool(**self._pool_kwargs)
             self.pool.start()
-            print("[VLLMGenerateCustom] ✅ Predictor Pool ready.")
+            print("[VLLMGenerateCustom] ✅ Allocator Pool ready.")
         except Exception as e:
-            print(f"[VLLMGenerateCustom] ❌ Failed to start predictor pool: {e}")
+            print(f"[VLLMGenerateCustom] ❌ Failed to start allocator pool: {e}")
             self.pool = None
 
 
@@ -1030,7 +1030,7 @@ class VLLMGenerateCustom(VLLMChat):
 
     def _prepare_scale_payload(self, request: Instance) -> Tuple[str, dict]:
         """
-        Prepare payload for predictor without calling it.
+        Prepare payload for allocator without calling it.
         Returns (compound_key, payload)
         """
         ctx, doc_to_messages, gen_kwargs, doc_id, task, split = request.arguments
@@ -1055,7 +1055,7 @@ class VLLMGenerateCustom(VLLMChat):
 
     def _submit_payloads_with_retries(self, payloads: List[dict], keys: List[str]) -> Dict[str, Dict[str, Any]]:
         """Submit payloads to pool with retries, returning results dict."""
-        self._ensure_predictor_pool()
+        self._ensure_allocator_pool()
         if self.pool is None:
             return {k: default_scale_entry() for k in keys}
 
@@ -1137,11 +1137,11 @@ class VLLMGenerateCustom(VLLMChat):
 
     def _batch_scale_preprocess(self, requests: List[Instance]) -> Dict[str, Dict[str, Any]]:
         """
-        Run predictor over all requests (one big batch), returning:
+        Run allocator over all requests (one big batch), returning:
           all_scales_dict[compound_key] = {"scale_means","scale_mask","scales"}
         """
-        # No predictor: return defaults with correct compound keys
-        if self.predictor_path is None and not self.enable_baseline_scale:
+        # No allocator: return defaults with correct compound keys
+        if self.allocator_path is None and not self.enable_baseline_scale:
             return {self.make_compound_key_from_req(req): default_scale_entry() for req in requests}
 
         payloads: List[dict] = []
@@ -1211,8 +1211,8 @@ class VLLMGenerateCustom(VLLMChat):
             audios = None
 
         packed_videos = None
-        chunk_selection_enabled = self.predictor_path is not None and (
-            self.predictor_keep_chunk_threshold is not None or self.predictor_keep_topk_chunks is not None
+        chunk_selection_enabled = self.allocator_path is not None and (
+            self.allocator_keep_chunk_threshold is not None or self.allocator_keep_topk_chunks is not None
         )
         if video_inputs is not None:
             packed_videos = [(v, m) for v, m in zip(video_inputs, video_metadatas)]
@@ -1237,7 +1237,7 @@ class VLLMGenerateCustom(VLLMChat):
         effective_scale_entry = dict(scale_entry)
         temporal_patch_size = getattr(self.processor.video_processor, "temporal_patch_size", 1)
 
-        if self.enable_baseline_scale and self.predictor_path is None:
+        if self.enable_baseline_scale and self.allocator_path is None:
             baseline_scales = _build_baseline_scales(
                 images,
                 packed_videos,
@@ -1265,11 +1265,11 @@ class VLLMGenerateCustom(VLLMChat):
                 patch_size=self.patch_size,
                 image_factor=self.image_factor,
                 temporal_patch_size=temporal_patch_size,
-                keep_topk_chunks=self.predictor_keep_topk_chunks if self.predictor_path is not None else None,
-                keep_chunk_threshold=self.predictor_keep_chunk_threshold if self.predictor_path is not None else None,
-                resize_kept_chunks=self.predictor_resize_kept_chunks,
-                topk_selector=self.predictor_topk_selector,
-                topk_unit=self.predictor_topk_unit,
+                keep_topk_chunks=self.allocator_keep_topk_chunks if self.allocator_path is not None else None,
+                keep_chunk_threshold=self.allocator_keep_chunk_threshold if self.allocator_path is not None else None,
+                resize_kept_chunks=self.allocator_resize_kept_chunks,
+                topk_selector=self.allocator_topk_selector,
+                topk_unit=self.allocator_topk_unit,
             )[0]
 
             updated_scales = mm_data.get("_adaptive_selected_scales", None)
@@ -1301,8 +1301,8 @@ class VLLMGenerateCustom(VLLMChat):
                 video_inputs = None
                 video_metadatas = None
 
-        elif self.predictor_path is not None:
-            # Predictor enabled but scales missing: keep original media
+        elif self.allocator_path is not None:
+            # Allocator enabled but scales missing: keep original media
             print(f"[VLLMGenerateCustom] Warning: scales missing for request {task}::{doc_id}, keeping original media")
 
         if self.add_sys:
@@ -1373,11 +1373,11 @@ class VLLMGenerateCustom(VLLMChat):
         except Exception:
             dist_available = False
         
-        # Only process scales via predictor
-        use_scale = (self.predictor_path is not None)
+        # Only process scales via allocator
+        use_scale = (self.allocator_path is not None)
         if len(requests) > 0 and use_scale:
             if self._is_main_rank:
-                # Rank 0: Gather requests from all ranks, run predictor pool, and broadcast scales
+                # Rank 0: Gather requests from all ranks, run allocator pool, and broadcast scales
                 self._unload_vllm()
                 
                 # 1. Gather all requests (payloads only, to strictly avoid pickling issues)
@@ -1415,7 +1415,7 @@ class VLLMGenerateCustom(VLLMChat):
                     all_payloads = local_payloads
                     all_keys = local_keys
 
-                # 2. Run predictor pool on all gathered payloads
+                # 2. Run allocator pool on all gathered payloads
                 try:
                     t0 = time.time()
                     all_scales_dict = self._get_scales_with_disk_cache(all_payloads, all_keys)
@@ -1427,8 +1427,8 @@ class VLLMGenerateCustom(VLLMChat):
                     traceback.print_exc()
                     all_scales_dict = {k: default_scale_entry() for k in all_keys}
                 
-                # Unload predictor pool to free memory before vLLM generation
-                self._unload_predictor()
+                # Unload allocator pool to free memory before vLLM generation
+                self._unload_allocator()
                 
                 # Convert tensors to CPU-serializable format for broadcast
                 all_scales_dict = self._scales_dict_to_cpu(all_scales_dict)
@@ -1530,7 +1530,7 @@ class VLLMGenerateCustom(VLLMChat):
                 scale_entry = scales_dict.get(key, default_scale_entry())
                 req.scale_stats = self._scale_entry_stats(scale_entry)
                 req.scales = self._normalize_scales(scale_entry.get("scales", None))
-                req.has_predictor_scale = scale_entry.get("scales", None) is not None
+                req.has_allocator_scale = scale_entry.get("scales", None) is not None
                 req.visual_len = vlen
 
             res.extend(response_text)

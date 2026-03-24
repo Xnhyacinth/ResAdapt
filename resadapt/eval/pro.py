@@ -117,7 +117,7 @@ def _run_one_generate(llm: Any, sampling_params: Any, vllm_inputs: Dict[str, Any
     return (t1 - t0), text
  
  
-def _run_one_with_predictor(
+def _run_one_with_allocator(
     *,
     pool: MultiGPUInferPool,
     processor: Any,
@@ -174,15 +174,15 @@ def _run_one_with_predictor(
     gen_s, text = _run_one_generate(llm, sampling_params, vllm_inputs)
     t3 = time.time()
  
-    predictor_s = t1 - t0
+    allocator_s = t1 - t0
     scaling_s = t2 - t1
     total_s = t3 - t0
-    return predictor_s, scaling_s, total_s, text
+    return allocator_s, scaling_s, total_s, text
  
  
 def _make_pool(args) -> MultiGPUInferPool:
     return MultiGPUInferPool(
-        model_path=args.predictor_path,
+        model_path=args.allocator_path,
         num_gpus=int(args.pred_num_gpus),
         enable_batch=True,
         microbatch_ms=int(args.pred_microbatch_ms),
@@ -192,7 +192,7 @@ def _make_pool(args) -> MultiGPUInferPool:
         max_total_inflight=int(args.pred_max_inflight_per_gpu) * int(args.pred_num_gpus),
         submit_threads=int(args.pred_submit_threads),
         max_frames=int(args.max_frames),
-        schedule_policy=os.getenv("PREDICTOR_SCHED_POLICY", "least_inflight"),
+        schedule_policy=os.getenv("ALLOCATOR_SCHED_POLICY", "least_inflight"),
     )
  
  
@@ -302,7 +302,7 @@ def main():
     parser.add_argument("--model", type=str, default=os.getenv("VLLM_MODEL", "Qwen/Qwen3-VL-8B-Instruct"))
     parser.add_argument("--video", type=str, default=os.getenv("VIDEO_PATH", ""))
     parser.add_argument("--prompt", type=str, default=os.getenv("VIDEO_PROMPT", "Describe the video briefly."))
-    parser.add_argument("--predictor-path", type=str, default=os.getenv("PREDICTOR_PATH", ""))
+    parser.add_argument("--allocator-path", type=str, default=os.getenv("ALLOCATOR_PATH", ""))
     parser.add_argument("--runs", type=int, default=int(os.getenv("RUNS", "20")))
     parser.add_argument("--warmup", type=int, default=int(os.getenv("WARMUP", "2")))
     parser.add_argument("--max-tokens", type=int, default=int(os.getenv("MAX_TOKENS", "64")))
@@ -352,12 +352,12 @@ def main():
  
     from vllm import LLM, SamplingParams
  
-    predictor_preprocess_s = 0.0
+    allocator_preprocess_s = 0.0
     scale_pairs = None
-    if args.predictor_path:
+    if args.allocator_path:
         pool = _make_pool(args)
         pool.start()
-        predictor_preprocess_s, scale_pairs = _predict_scales_batch(
+        allocator_preprocess_s, scale_pairs = _predict_scales_batch(
             pool,
             hf_messages,
             count=int(args.warmup) + int(args.runs),
@@ -438,14 +438,14 @@ def main():
     b_mean, b_std = _mean_std(baseline_gen_s)
     print(f"[baseline] runs={len(baseline_gen_s)} gen_s_mean={b_mean:.4f} gen_s_std={b_std:.4f}")
  
-    if args.predictor_path:
+    if args.allocator_path:
         s_mean, s_std = _mean_std(pred_scaling_s)
         g_mean, g_std = _mean_std(pred_gen_s)
-        per_sample_pre = predictor_preprocess_s / max(1, int(args.warmup) + int(args.runs))
-        print(f"[predictor] preprocess_batch_s={predictor_preprocess_s:.4f} preprocess_per_sample_s={per_sample_pre:.4f}")
-        print(f"[predictor] gen_scaled_s_mean={g_mean:.4f} gen_scaled_s_std={g_std:.4f}")
-        print(f"[predictor] scaling_s_mean={s_mean:.4f} scaling_s_std={s_std:.4f}")
-        print(f"[predictor] total_per_sample_est={per_sample_pre + (s_mean or 0.0) + (g_mean or 0.0):.4f}")
+        per_sample_pre = allocator_preprocess_s / max(1, int(args.warmup) + int(args.runs))
+        print(f"[allocator] preprocess_batch_s={allocator_preprocess_s:.4f} preprocess_per_sample_s={per_sample_pre:.4f}")
+        print(f"[allocator] gen_scaled_s_mean={g_mean:.4f} gen_scaled_s_std={g_std:.4f}")
+        print(f"[allocator] scaling_s_mean={s_mean:.4f} scaling_s_std={s_std:.4f}")
+        print(f"[allocator] total_per_sample_est={per_sample_pre + (s_mean or 0.0) + (g_mean or 0.0):.4f}")
  
  
 if __name__ == "__main__":

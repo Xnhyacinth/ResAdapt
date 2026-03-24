@@ -129,17 +129,17 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
                 transformer_cls_to_wrap.add(transformer_cls)
 
         ###
-        # from resadapt.utils.modeling_qwenvl import RegressionHeadPredictor
-        # from resadapt.utils.AZNet import PredictorDecoderLayer, ProjectorBlock
-        # transformer_cls_to_wrap.update([PredictorDecoderLayer, ProjectorBlock])
+        # from resadapt.utils.modeling_qwenvl import RegressionHeadAllocator
+        # from resadapt.utils.AZNet import AllocatorDecoderLayer, ProjectorBlock
+        # transformer_cls_to_wrap.update([AllocatorDecoderLayer, ProjectorBlock])
         
-        # from resadapt.allocator.AZNet import PredictorDecoderLayer
+        # from resadapt.allocator.AZNet import AllocatorDecoderLayer
         # from resadapt.allocator.AZNetv2 import SmallTextEncoder
-        # transformer_cls_to_wrap.update([PredictorDecoderLayer, SmallTextEncoder])
+        # transformer_cls_to_wrap.update([AllocatorDecoderLayer, SmallTextEncoder])
         
-        # # Add V2 Predictor modules
+        # # Add V2 Allocator modules
         # try:
-        #     from resadapt.allocator.importance_predictor_v1 import (
+        #     from resadapt.allocator.importance_allocator_v1 import (
         #         CrossModalMatcher,
         #         DualPathEncoder,
         #         # FrameInformationEncoder,
@@ -152,7 +152,7 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
         #         # ContrastiveDifferentiator
         #     ])
         # except ImportError:
-        #     # V2 predictor might not be available or used
+        #     # V2 allocator might not be available or used
         #     pass
 
         # from resadapt.allocator.AZNetv4 import CrossAttentionStack, FrameTemporalEncoder, SpatialBlockV2, TemporalBlockV2
@@ -160,7 +160,7 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
         # print(transformer_cls_to_wrap)
 
         # def scale_policy_fn(module):
-        #     if isinstance(module, RegressionHeadPredictor):
+        #     if isinstance(module, RegressionHeadAllocator):
         #         return True
                 
         #     return False

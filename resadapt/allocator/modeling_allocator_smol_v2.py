@@ -6,12 +6,12 @@ from torch.nn.utils.rnn import pad_sequence
 from transformers import AutoProcessor, AutoModelForImageTextToText, PreTrainedModel
 from concurrent.futures import ThreadPoolExecutor
 
-from resadapt.allocator.smol_config import SmolPredictorConfig
-from resadapt.allocator.aznet_smol_v3 import RegressionHeadPredictorSmol
+from resadapt.allocator.smol_config import SmolAllocatorConfig
+from resadapt.allocator.aznet_smol_v2 import RegressionHeadAllocatorSmol
 
 
-class SmolPredictorForConditionalGeneration(PreTrainedModel):
-    config_class = SmolPredictorConfig
+class SmolAllocatorForConditionalGeneration(PreTrainedModel):
+    config_class = SmolAllocatorConfig
 
     supports_gradient_checkpointing = True
     # _no_split_modules = ["SmolVLMVisionAttention", "SmolVLMDecoderLayer"]
@@ -21,15 +21,15 @@ class SmolPredictorForConditionalGeneration(PreTrainedModel):
     _can_compile_fullgraph = True
     _supports_attention_backend = True
 
-    def __init__(self, config: SmolPredictorConfig):
+    def __init__(self, config: SmolAllocatorConfig):
         super().__init__(config)
         self.config = config
         model_name = getattr(config, "smol_model_name", "HuggingFaceTB/SmolVLM2-256M-Video-Instruct")
         self.processor = AutoProcessor.from_pretrained(model_name)
 
-        print(f"set predictor min_scale: {config.min_scale}")
-        print(f"set predictor max_scale: {config.max_scale}")
-        print(f"set predictor max_frames: {config.max_frames}")
+        print(f"set allocator min_scale: {config.min_scale}")
+        print(f"set allocator max_scale: {config.max_scale}")
+        print(f"set allocator max_frames: {config.max_frames}")
 
         if hasattr(self.processor, "video_processor") and self.processor.video_processor is not None:
             self.processor.video_processor.num_frames = int(getattr(config, "max_frames", 16))
@@ -42,10 +42,10 @@ class SmolPredictorForConditionalGeneration(PreTrainedModel):
             dtype=getattr(config, "dtype", "auto"),
             _attn_implementation=getattr(config, "_attn_implementation", "flash_attention_2"),
         )
-        self.predictor = RegressionHeadPredictorSmol(config)
+        self.allocator = RegressionHeadAllocatorSmol(config)
 
     def _timing_enabled(self) -> bool:
-        return str(os.getenv("PREDICTOR_TIMING", "0")).lower() in ("1", "true", "yes", "y", "t", "on")
+        return str(os.getenv("ALLOCATOR_TIMING", "0")).lower() in ("1", "true", "yes", "y", "t", "on")
 
     def _resolve_text_model(self):
         for attr in ["text_model", "language_model", "model"]:
@@ -181,7 +181,7 @@ class SmolPredictorForConditionalGeneration(PreTrainedModel):
     @staticmethod
     def _extract_plain_text(msg):
         if isinstance(msg, list):
-            return "\n".join(filter(None, (SmolPredictorForConditionalGeneration._extract_plain_text(m) for m in msg)))
+            return "\n".join(filter(None, (SmolAllocatorForConditionalGeneration._extract_plain_text(m) for m in msg)))
         if msg.get("role") == "system":
             return ""
         content = msg.get("content", "")
@@ -332,8 +332,6 @@ class SmolPredictorForConditionalGeneration(PreTrainedModel):
         compute_aux = actions is not None and eval_mode is not True
         return_mm_data = kwargs.get("return_mm_data", False)
         preprocess_workers = kwargs.get("preprocess_workers", 16)
-        compute_frame_metrics_param = kwargs.get("compute_frame_metrics", False)
-        pixel_attention_mask = None
 
         if input_ids is None and messages is None:
             raise ValueError("Either input_ids or messages must be provided.")
@@ -386,7 +384,7 @@ class SmolPredictorForConditionalGeneration(PreTrainedModel):
             if self._timing_enabled():
                 _t_msg1 = time.perf_counter()
                 print(
-                    f"[predictor_timing] messages_preprocess_s={( _t_msg1 - _t_msg0 ):.4f} "
+                    f"[allocator_timing] messages_preprocess_s={( _t_msg1 - _t_msg0 ):.4f} "
                     f"samples={len(messages) if isinstance(messages, list) else 0}",
                     flush=True,
                 )
@@ -406,7 +404,7 @@ class SmolPredictorForConditionalGeneration(PreTrainedModel):
                     _t0 = time.perf_counter()
                     text_features = self._encode_text(text_input_ids, text_attention_mask)
                     _t1 = time.perf_counter()
-                    print(f"[predictor_timing] encode_text_s={( _t1 - _t0 ):.4f}", flush=True)
+                    print(f"[allocator_timing] encode_text_s={( _t1 - _t0 ):.4f}", flush=True)
                 else:
                     text_features = self._encode_text(text_input_ids, text_attention_mask)
             elif input_ids is not None:
@@ -416,7 +414,7 @@ class SmolPredictorForConditionalGeneration(PreTrainedModel):
                     _t0 = time.perf_counter()
                     text_features = self._encode_text(input_ids, attention_mask)
                     _t1 = time.perf_counter()
-                    print(f"[predictor_timing] encode_text_s={( _t1 - _t0 ):.4f}", flush=True)
+                    print(f"[allocator_timing] encode_text_s={( _t1 - _t0 ):.4f}", flush=True)
                 else:
                     text_features = self._encode_text(input_ids, attention_mask)
 
@@ -430,7 +428,7 @@ class SmolPredictorForConditionalGeneration(PreTrainedModel):
                 _t0 = time.perf_counter()
                 image_hidden_states = self._get_image_features(pixel_values, pixel_attention_mask)
                 _t1 = time.perf_counter()
-                print(f"[predictor_timing] get_image_features_s={( _t1 - _t0 ):.4f}", flush=True)
+                print(f"[allocator_timing] get_image_features_s={( _t1 - _t0 ):.4f}", flush=True)
             else:
                 image_hidden_states = self._get_image_features(pixel_values, pixel_attention_mask)
             printed_sim = False
@@ -441,7 +439,7 @@ class SmolPredictorForConditionalGeneration(PreTrainedModel):
                     _t0 = time.perf_counter()
                     image_hidden_states = self._encode_vision(flat)
                     _t1 = time.perf_counter()
-                    print(f"[predictor_timing] encode_vision_s={( _t1 - _t0 ):.4f}", flush=True)
+                    print(f"[allocator_timing] encode_vision_s={( _t1 - _t0 ):.4f}", flush=True)
                 else:
                     image_hidden_states = self._encode_vision(flat)
             if image_hidden_states is not None:
@@ -499,7 +497,7 @@ class SmolPredictorForConditionalGeneration(PreTrainedModel):
         visual_grid_thw = torch.stack(visual_grids, dim=0).to(self.device)
         if self._timing_enabled():
             _t0 = time.perf_counter()
-            new_actions, scales, log_probs, new_scale_mask = self.predictor(
+            new_actions, scales, log_probs, new_scale_mask = self.allocator(
                 visual_features=visual_features,
                 visual_grid_thw=visual_grid_thw,
                 text_features=text_features,
@@ -508,16 +506,16 @@ class SmolPredictorForConditionalGeneration(PreTrainedModel):
                 visual_per_sample=visual_per_sample,
                 eval_mode=eval_mode,
                 scale_mask=scale_mask,
-                compute_frame_metrics=compute_frame_metrics_param,
+                compute_frame_metrics=kwargs.get("compute_frame_metrics", False) and compute_aux,
             )
             _t1 = time.perf_counter()
             print(
-                f"[predictor_timing] predictor_head_s={( _t1 - _t0 ):.4f} "
+                f"[allocator_timing] allocator_head_s={( _t1 - _t0 ):.4f} "
                 f"samples={sample_count} visual_items={int(visual_grid_thw.shape[0])}",
                 flush=True,
             )
         else:
-            new_actions, scales, log_probs, new_scale_mask = self.predictor(
+            new_actions, scales, log_probs, new_scale_mask = self.allocator(
                 visual_features=visual_features,
                 visual_grid_thw=visual_grid_thw,
                 text_features=text_features,
@@ -526,35 +524,37 @@ class SmolPredictorForConditionalGeneration(PreTrainedModel):
                 visual_per_sample=visual_per_sample,
                 eval_mode=eval_mode,
                 scale_mask=scale_mask,
-                compute_frame_metrics=compute_frame_metrics_param,
+                compute_frame_metrics=kwargs.get("compute_frame_metrics", False) and compute_aux,
             )
-        # print(f"[predictor] scales={scales}")
+        # print(f"[allocator] scales={scales}")
         # breakpoint()
 
         if self._timing_enabled():
             _t_total1 = time.perf_counter()
             print(
-                f"[predictor_timing] encode_plus_predictor_total_s={( _t_total1 - _t_total0 ):.4f} "
+                f"[allocator_timing] encode_plus_allocator_total_s={( _t_total1 - _t_total0 ):.4f} "
                 f"samples={sample_count}",
                 flush=True,
             )
 
-        frame_metrics = self.predictor.get_frame_metrics() if compute_frame_metrics_param else {}
+        frame_metrics = {}
 
         if actions is not None:
             if compute_aux:
-                contrastive_loss = self.predictor.get_contrastive_loss() if hasattr(self.predictor, "get_contrastive_loss") else getattr(self.predictor, "_last_contrastive_loss", None)
+                contrastive_loss = self.allocator.get_contrastive_loss() if hasattr(self.allocator, "get_contrastive_loss") else getattr(self.allocator, "_last_contrastive_loss", None)
                 sim_scale_loss = (
-                    self.predictor.get_sim_scale_loss()
-                    if hasattr(self.predictor, "get_sim_scale_loss")
-                    else getattr(self.predictor, "_last_sim_scale_loss", None)
+                    self.allocator.get_sim_scale_loss()
+                    if hasattr(self.allocator, "get_sim_scale_loss")
+                    else getattr(self.allocator, "_last_sim_scale_loss", None)
                 )
-                scale_var = getattr(self.predictor.scorer, "_last_scale_var", None)
-                concentration_loss = self.predictor._last_concentration_loss
-                entropy = getattr(self.predictor.scorer, "last_entropy", None)
+                frame_metrics = self.allocator.get_frame_metrics()
+                scale_var = getattr(self.allocator.scorer, "_last_scale_var", None)
+                concentration_loss = self.allocator._last_concentration_loss
+                entropy = getattr(self.allocator.scorer, "last_entropy", None)
             else:
                 contrastive_loss = None
                 sim_scale_loss = None
+                frame_metrics = {}
                 scale_var = None
                 concentration_loss = None
                 entropy = None
@@ -574,7 +574,8 @@ class SmolPredictorForConditionalGeneration(PreTrainedModel):
                 "actions": new_actions, 
                 "scale_mask": new_scale_mask,
                 "log_probs": log_probs, 
-                "frame_metrics": frame_metrics,
+                # "frame_metrics": frame_metrics,
+                # "entropy": getattr(self.allocator.scorer, "last_entropy", None),
             }
 
         return {
@@ -595,7 +596,7 @@ def count_params(model):
     return total, trainable
 
 if __name__ == "__main__":
-    config = SmolPredictorConfig(
+    config = SmolAllocatorConfig(
         smol_model_name="HuggingFaceTB/SmolVLM2-256M-Video-Instruct",
         vocab_size=49280,
         patch_size=16,
@@ -656,12 +657,12 @@ if __name__ == "__main__":
         sim_gamma=0.05,
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = SmolPredictorForConditionalGeneration(config).to(device)
-    logistic_normal_config = SmolPredictorConfig(**{**config.to_dict(), "continuous_dist": "logistic_normal"})
-    logistic_normal_model = SmolPredictorForConditionalGeneration(logistic_normal_config).to(device)
-    # "/mnt/bn/jiangzhongtao/users/liaohuanxuan/models/predictorv2_sft",
-    # model = SmolPredictorForConditionalGeneration.from_pretrained(
-    #     "/mnt/bn/jiangzhongtao/users/liaohuanxuan/models/predictor_smol_init",
+    # model = SmolAllocatorForConditionalGeneration(config).to(device)
+    logistic_normal_config = SmolAllocatorConfig(**{**config.to_dict(), "continuous_dist": "logistic_normal"})
+    model = SmolAllocatorForConditionalGeneration(logistic_normal_config).to(device)
+    # "YOUR_WORKSPACE_PATH/models/allocatorv2_sft",
+    # model = SmolAllocatorForConditionalGeneration.from_pretrained(
+    #     "YOUR_WORKSPACE_PATH/models/allocator_smol_init",
     #     config=config,
     #     dtype=torch.bfloat16,
     #     device_map="auto",
@@ -674,13 +675,13 @@ if __name__ == "__main__":
     print(f"Trainable params: {trainable/1e9:.3f} B")
     
     from PIL import Image
-    image = Image.open("/mnt/bn/jiangzhongtao/users/liaohuanxuan/VisionThink/scissor.png")
-    image1 = Image.open("/mnt/bn/jiangzhongtao/users/liaohuanxuan/vlm_datasets/LLaVA-Pretrain/images/00000/000000010.jpg")
+    image = Image.open("YOUR_WORKSPACE_PATH/VisionThink/scissor.png")
+    image1 = Image.open("YOUR_WORKSPACE_PATH/vlm_datasets/LLaVA-Pretrain/images/00000/000000010.jpg")
     
     messages = [
         [{"role": "user", "content": [{"type": "image", "image": image}, {"type": "image", "image": image1}, {"type": "text", "text": "Describe this image."}]}],
         [{"role": "user", "content": [{"type": "image", "image": image1}, {"type": "text", "text": "Describe this image."}]}],
-        [{"role": "user", "content": [{"type": "video", "video": "/mnt/bn/jiangzhongtao/users/liaohuanxuan/vlm_datasets/LLaVA-Video-178K/gpt4o_caption_prompt/83FR0RjX7qA.mp4", "max_frames": 8}, {"type": "text", "text": "Describe this video."}]}],
+        [{"role": "user", "content": [{"type": "video", "video": "YOUR_WORKSPACE_PATH/vlm_datasets/LLaVA-Video-178K/gpt4o_caption_prompt/83FR0RjX7qA.mp4", "max_frames": 8}, {"type": "text", "text": "Describe this video."}]}],
     ]
 
     messages_text = [
@@ -692,7 +693,7 @@ if __name__ == "__main__":
         }
     ]
 
-    # save_path = "/mnt/bn/jiangzhongtao/users/liaohuanxuan/models/predictor_smolv1"
+    # save_path = "YOUR_WORKSPACE_PATH/models/allocator_smolv4"
     # model.save_pretrained(save_path, safe_serialization=True)
     out = model.scale_multi_modal(messages=messages, return_mm_data=False, eval_mode=True)
     out_text = model.scale_multi_modal(messages=messages_text, return_mm_data=False, eval_mode=True)

@@ -37,7 +37,7 @@ class Role(Enum):
     ActorRolloutRef = 6
     Env = 7
     ###
-    Predictor = 8
+    Allocator = 8
     ###
 
     def __str__(self):
@@ -53,7 +53,7 @@ class Role(Enum):
             Role.RewardModel: "rm",
             Role.ActorRolloutRef: "actor_rollout_ref",
             ###
-            Role.Predictor: "predictor",
+            Role.Allocator: "allocator",
             ###
         }
         return role_mapping.get(self, self.name.lower())
@@ -69,7 +69,7 @@ class Role(Enum):
             "rm": cls.RewardModel,
             "actor_rollout_ref": cls.ActorRolloutRef,
             ###
-            "predictor": cls.Predictor,
+            "allocator": cls.Allocator,
             ###
         }
         role = string_mapping.get(name.lower())
@@ -106,14 +106,14 @@ def need_critic(config: DictConfig) -> bool:
         return False
 
 ###
-def need_predictor(config: DictConfig) -> bool:
-    """Given a config, do we need predictor."""
-    if config.predictor.enable is not None:
-        return bool(config.predictor.enable)
+def need_allocator(config: DictConfig) -> bool:
+    """Given a config, do we need allocator."""
+    if config.allocator.enable is not None:
+        return bool(config.allocator.enable)
 
     else:
         warnings.warn(
-            "Disabled predictor. If it is not intended, please set predictor.enable=True",
+            "Disabled allocator. If it is not intended, please set allocator.enable=True",
             stacklevel=2,
         )
         return False

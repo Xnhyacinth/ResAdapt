@@ -266,34 +266,34 @@ class TaskRunner:
             self.mapping[Role.RefPolicy] = "global_pool"
 
     ###
-    def add_predictor_worker(self, config):
-        """Add predictor worker if predictor is configured and enabled."""
-        if not hasattr(config, "predictor") or not bool(config.predictor.get("enable", False)):
-            print("Dont Use The Predictor!")
+    def add_allocator_worker(self, config):
+        """Add allocator worker if allocator is configured and enabled."""
+        if not hasattr(config, "allocator") or not bool(config.allocator.get("enable", False)):
+            print("Dont Use The Allocator!")
             return
 
         from verl.trainer.ppo.ray_trainer import Role
         from omegaconf import open_dict
         
         base_config = config.actor_rollout_ref
-        override_config = config.predictor
+        override_config = config.allocator
         with open_dict(base_config):
             merged_config = OmegaConf.merge(base_config, override_config)
-        config.predictor = merged_config
+        config.allocator = merged_config
 
         # Check strategy and import appropriate worker
-        if config.predictor.actor.strategy in {"fsdp", "fsdp2"}:
-            from resadapt.verl_patches.fsdp_workers import AsyncPredictorWorker
-        elif config.predictor.actor.strategy == "megatron":
-            from resadapt.allocator.megatron_workers import AsyncPredictorWorker
+        if config.allocator.actor.strategy in {"fsdp", "fsdp2"}:
+            from resadapt.verl_patches.fsdp_workers import AsyncAllocatorWorker
+        elif config.allocator.actor.strategy == "megatron":
+            from resadapt.allocator.megatron_workers import AsyncAllocatorWorker
         else:
-            raise NotImplementedError(f"Predictor strategy {config.predictor.actor.strategy} not implemented")
+            raise NotImplementedError(f"Allocator strategy {config.allocator.actor.strategy} not implemented")
 
-        self.role_worker_mapping[Role.Predictor] = ray.remote(AsyncPredictorWorker)
-        enable_pred_pool = bool(config.predictor.get("enable_resource_pool", False)) or bool(
-            config.predictor.get("dedicated_8gpu", False)
+        self.role_worker_mapping[Role.Allocator] = ray.remote(AsyncAllocatorWorker)
+        enable_pred_pool = bool(config.allocator.get("enable_resource_pool", False)) or bool(
+            config.allocator.get("dedicated_8gpu", False)
         )
-        self.mapping[Role.Predictor] = "predictor_pool" if enable_pred_pool else "global_pool"
+        self.mapping[Role.Allocator] = "allocator_pool" if enable_pred_pool else "global_pool"
     ###
 
     def run(self, config):
@@ -326,8 +326,8 @@ class TaskRunner:
         self.add_ref_policy_worker(config, actor_rollout_cls)
 
         ###
-        # add predictor worker
-        self.add_predictor_worker(config)
+        # add allocator worker
+        self.add_allocator_worker(config)
         ###
 
         # validate config

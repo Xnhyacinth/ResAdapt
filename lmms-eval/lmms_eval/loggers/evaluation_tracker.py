@@ -765,10 +765,10 @@ class EvaluationTracker:
                 rescaled_tasks = []
                 for sample in samples:
                     rescaled_mm_data = sample.get("rescaled_mm_data", None)
-                    has_predictor_scale = sample.get("has_predictor_scale", None)
-                    if isinstance(has_predictor_scale, (list, tuple)):
-                        has_predictor_scale = any(bool(v) for v in has_predictor_scale)
-                    if rescaled_mm_data is not None and has_predictor_scale:
+                    has_allocator_scale = sample.get("has_allocator_scale", None)
+                    if isinstance(has_allocator_scale, (list, tuple)):
+                        has_allocator_scale = any(bool(v) for v in has_allocator_scale)
+                    if rescaled_mm_data is not None and has_allocator_scale:
                         doc_id = sample.get("doc_id", None)
                         question = None
                         arguments = sample.get("arguments", None)

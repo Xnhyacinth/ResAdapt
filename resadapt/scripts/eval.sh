@@ -8,14 +8,14 @@ export MODEL_VERSION="gpt-5-2025-08-07"
 
 # export PYTORCH_ALLOC_CONF="max_split_size_mb:64,garbage_collection_threshold:0.8"
 #
-# Predictor temporal chunk retention (vllm_generate_custom; mutually exclusive threshold vs top-k):
-#   Env (optional, not cleared by unset at top — same pattern as PREDICTOR_MAX_SCALE):
-#     export PREDICTOR_KEEP_CHUNK_THRESHOLD=0.5   # keep chunks whose mean scale >= threshold
-#     export PREDICTOR_KEEP_TOPK_CHUNKS=32        # frame budget for top-k selection
-#     export PREDICTOR_RESIZE_KEPT_CHUNKS=0       # 0/false: no resize-to-original after selection
-#     export PREDICTOR_TOPK_SELECTOR=pass         # greedy|pass
-#     export PREDICTOR_TOPK_UNIT=chunk            # auto|frame|chunk
-#   method (arg 10) or predictor_chunk (arg 12) substrings:
+# Allocator temporal chunk retention (vllm_generate_custom; mutually exclusive threshold vs top-k):
+#   Env (optional, not cleared by unset at top — same pattern as ALLOCATOR_MAX_SCALE):
+#     export ALLOCATOR_KEEP_CHUNK_THRESHOLD=0.5   # keep chunks whose mean scale >= threshold
+#     export ALLOCATOR_KEEP_TOPK_CHUNKS=32        # frame budget for top-k selection
+#     export ALLOCATOR_RESIZE_KEPT_CHUNKS=0       # 0/false: no resize-to-original after selection
+#     export ALLOCATOR_TOPK_SELECTOR=pass         # greedy|pass
+#     export ALLOCATOR_TOPK_UNIT=chunk            # auto|frame|chunk
+#   method (arg 10) or allocator_chunk (arg 12) substrings:
 #     chunk_th0.5       -> threshold 0.5
 #     chunk_topk32      -> top-k frame budget 32
 #     chunk_noresize    -> resize kept chunks off
@@ -25,7 +25,7 @@ export MODEL_VERSION="gpt-5-2025-08-07"
 #            ./eval.sh ... method0 0 0 0 0 0 0 0 logs 0 0 0 chunk_topk32_chunk_pass
 #            ./eval.sh ... method0 0 0 0 0 0 0 0 logs 0 0 0 chunk_topk32_chunk_bychunk_chunk_noresize
 
-unset PREDICTOR_PATH ENABLE_BASELINE_SCALE BASELINE_SCALE_FACTOR USE_DEBUG MICRO_BATCH WORKERS max_inflight_per_gpu
+unset ALLOCATOR_PATH ENABLE_BASELINE_SCALE BASELINE_SCALE_FACTOR USE_DEBUG MICRO_BATCH WORKERS max_inflight_per_gpu
 unset CONVERT2IMAGES REMOVEPAD VLLM_MROPE_PATCH VIDEO2LIST VIDEO2IMAGE ADD_SYS
 cp -r YOUR_WORKSPACE_PATH/longvu/lmms-eval/lmms_eval YOUR_WORKSPACE_PATH/ResAdapt/lmms-eval
 
@@ -41,8 +41,8 @@ idx=${8:-"0"}
 log=${9:-"logs_eval"}
 method=${10:-"0"}
 debug=${11:-"0"}
-# Optional: extra tokens for predictor chunk selection (chunk_th*, chunk_topk*, chunk_noresize); merged with method for parsing
-predictor_chunk_spec=${12:-""}
+# Optional: extra tokens for allocator chunk selection (chunk_th*, chunk_topk*, chunk_noresize); merged with method for parsing
+allocator_chunk_spec=${12:-""}
 
 image_min_tokens=128
 image_max_tokens=16384
@@ -186,9 +186,9 @@ elif [[ "$conv_template" == *"vllm"* ]]; then
     fi
 
     if [[ "$model" == *"sc"* ]] && [[ "$method" != *"nopred"* ]]; then
-        export PREDICTOR_PATH="${model}pred"
-        export PREDICTOR_NUM_GPUS=${NUM_GPUS}
-        echo "Using predictor path: $PREDICTOR_PATH"
+        export ALLOCATOR_PATH="${model}pred"
+        export ALLOCATOR_NUM_GPUS=${NUM_GPUS}
+        echo "Using allocator path: $ALLOCATOR_PATH"
     fi
 
     if [[ "$method" == *"base"* ]]; then
@@ -233,31 +233,31 @@ elif [[ "$conv_template" == *"vllm"* ]]; then
     min_scale=$(echo "$method" | grep -oP 'min\K[0-9]+(\.[0-9]+)?' | head -n 1)
     max_scale=$(echo "$method" | grep -oP 'max\K[0-9]+(\.[0-9]+)?' | head -n 1)
     if [ -n "$max_scale" ]; then
-        model_args="${model_args},predictor_max_scale=${max_scale}"
-    elif [ -n "$PREDICTOR_MAX_SCALE" ]; then
-        model_args="${model_args},predictor_max_scale=${PREDICTOR_MAX_SCALE}"
+        model_args="${model_args},allocator_max_scale=${max_scale}"
+    elif [ -n "$ALLOCATOR_MAX_SCALE" ]; then
+        model_args="${model_args},allocator_max_scale=${ALLOCATOR_MAX_SCALE}"
     fi
     if [ -n "$min_scale" ]; then
-        model_args="${model_args},predictor_min_scale=${min_scale}"
-    elif [ -n "$PREDICTOR_MIN_SCALE" ]; then
-        model_args="${model_args},predictor_min_scale=${PREDICTOR_MIN_SCALE}"
+        model_args="${model_args},allocator_min_scale=${min_scale}"
+    elif [ -n "$ALLOCATOR_MIN_SCALE" ]; then
+        model_args="${model_args},allocator_min_scale=${ALLOCATOR_MIN_SCALE}"
     fi
 
-    # Predictor chunk retention: parse method + optional arg12; export env + model_args (top-k wins over threshold if both)
+    # Allocator chunk retention: parse method + optional arg12; export env + model_args (top-k wins over threshold if both)
     _chunk_src="${method}"
-    if [ -n "${predictor_chunk_spec}" ] && [ "${predictor_chunk_spec}" != "0" ]; then
-        _chunk_src="${method}_${predictor_chunk_spec}"
-        extra_name="${extra_name}_pchunk${predictor_chunk_spec}"
+    if [ -n "${allocator_chunk_spec}" ] && [ "${allocator_chunk_spec}" != "0" ]; then
+        _chunk_src="${method}_${allocator_chunk_spec}"
+        extra_name="${extra_name}_pchunk${allocator_chunk_spec}"
     fi
     if [[ "${_chunk_src}" == *"chunk_noresize"* ]]; then
-        export PREDICTOR_RESIZE_KEPT_CHUNKS=0
+        export ALLOCATOR_RESIZE_KEPT_CHUNKS=0
     fi
     if [[ "${_chunk_src}" == *"chunk_pass"* ]]; then
-        export PREDICTOR_TOPK_SELECTOR=pass
+        export ALLOCATOR_TOPK_SELECTOR=pass
         extra_name="${extra_name}_cpass"
     fi
     if [[ "${_chunk_src}" == *"chunk_bychunk"* ]]; then
-        export PREDICTOR_TOPK_UNIT=chunk
+        export ALLOCATOR_TOPK_UNIT=chunk
         extra_name="${extra_name}_cbychunk"
     fi
     if [[ "${_chunk_src}" == *"chunk_pass"* ]] && [[ "${_chunk_src}" == *"chunk_bychunk"* ]]; then
@@ -271,31 +271,31 @@ elif [[ "$conv_template" == *"vllm"* ]]; then
         _chunk_th=""
     fi
     if [ -n "${_chunk_topk}" ]; then
-        export PREDICTOR_KEEP_TOPK_CHUNKS=${_chunk_topk}
+        export ALLOCATOR_KEEP_TOPK_CHUNKS=${_chunk_topk}
         extra_name="${extra_name}_ctopk${_chunk_topk}"
     elif [ -n "${_chunk_th}" ]; then
-        export PREDICTOR_KEEP_CHUNK_THRESHOLD=${_chunk_th}
+        export ALLOCATOR_KEEP_CHUNK_THRESHOLD=${_chunk_th}
         extra_name="${extra_name}_cth${_chunk_th}"
     fi
-    if [ -n "${PREDICTOR_KEEP_TOPK_CHUNKS:-}" ] && [ "${PREDICTOR_TOPK_SELECTOR:-}" = "pass" ] && [ "${PREDICTOR_TOPK_UNIT:-}" = "chunk" ]; then
+    if [ -n "${ALLOCATOR_KEEP_TOPK_CHUNKS:-}" ] && [ "${ALLOCATOR_TOPK_SELECTOR:-}" = "pass" ] && [ "${ALLOCATOR_TOPK_UNIT:-}" = "chunk" ]; then
         echo "Error: effective top-k config cannot combine PASS selector with chunk unit"
         exit 1
     fi
-    if [ -n "${PREDICTOR_KEEP_TOPK_CHUNKS:-}" ]; then
-        unset PREDICTOR_KEEP_CHUNK_THRESHOLD
-        model_args="${model_args},predictor_keep_topk_chunks=${PREDICTOR_KEEP_TOPK_CHUNKS}"
-    elif [ -n "${PREDICTOR_KEEP_CHUNK_THRESHOLD:-}" ]; then
-        unset PREDICTOR_KEEP_TOPK_CHUNKS
-        model_args="${model_args},predictor_keep_chunk_threshold=${PREDICTOR_KEEP_CHUNK_THRESHOLD}"
+    if [ -n "${ALLOCATOR_KEEP_TOPK_CHUNKS:-}" ]; then
+        unset ALLOCATOR_KEEP_CHUNK_THRESHOLD
+        model_args="${model_args},allocator_keep_topk_chunks=${ALLOCATOR_KEEP_TOPK_CHUNKS}"
+    elif [ -n "${ALLOCATOR_KEEP_CHUNK_THRESHOLD:-}" ]; then
+        unset ALLOCATOR_KEEP_TOPK_CHUNKS
+        model_args="${model_args},allocator_keep_chunk_threshold=${ALLOCATOR_KEEP_CHUNK_THRESHOLD}"
     fi
-    if [ -n "${PREDICTOR_RESIZE_KEPT_CHUNKS:-}" ]; then
-        model_args="${model_args},predictor_resize_kept_chunks=${PREDICTOR_RESIZE_KEPT_CHUNKS}"
+    if [ -n "${ALLOCATOR_RESIZE_KEPT_CHUNKS:-}" ]; then
+        model_args="${model_args},allocator_resize_kept_chunks=${ALLOCATOR_RESIZE_KEPT_CHUNKS}"
     fi
-    if [ -n "${PREDICTOR_TOPK_SELECTOR:-}" ]; then
-        model_args="${model_args},predictor_topk_selector=${PREDICTOR_TOPK_SELECTOR}"
+    if [ -n "${ALLOCATOR_TOPK_SELECTOR:-}" ]; then
+        model_args="${model_args},allocator_topk_selector=${ALLOCATOR_TOPK_SELECTOR}"
     fi
-    if [ -n "${PREDICTOR_TOPK_UNIT:-}" ]; then
-        model_args="${model_args},predictor_topk_unit=${PREDICTOR_TOPK_UNIT}"
+    if [ -n "${ALLOCATOR_TOPK_UNIT:-}" ]; then
+        model_args="${model_args},allocator_topk_unit=${ALLOCATOR_TOPK_UNIT}"
     fi
 
     if [[ "$method" == *"len"* ]]; then
@@ -783,8 +783,8 @@ fi
 
 echo "model: ${model}"
 echo "model_type: ${model_type}"
-echo "predictor_chunk_spec (arg12): ${predictor_chunk_spec:-}"
-echo "PREDICTOR_KEEP_CHUNK_THRESHOLD=${PREDICTOR_KEEP_CHUNK_THRESHOLD:-} PREDICTOR_KEEP_TOPK_CHUNKS=${PREDICTOR_KEEP_TOPK_CHUNKS:-} PREDICTOR_RESIZE_KEPT_CHUNKS=${PREDICTOR_RESIZE_KEPT_CHUNKS:-} PREDICTOR_TOPK_SELECTOR=${PREDICTOR_TOPK_SELECTOR:-} PREDICTOR_TOPK_UNIT=${PREDICTOR_TOPK_UNIT:-}"
+echo "allocator_chunk_spec (arg12): ${allocator_chunk_spec:-}"
+echo "ALLOCATOR_KEEP_CHUNK_THRESHOLD=${ALLOCATOR_KEEP_CHUNK_THRESHOLD:-} ALLOCATOR_KEEP_TOPK_CHUNKS=${ALLOCATOR_KEEP_TOPK_CHUNKS:-} ALLOCATOR_RESIZE_KEPT_CHUNKS=${ALLOCATOR_RESIZE_KEPT_CHUNKS:-} ALLOCATOR_TOPK_SELECTOR=${ALLOCATOR_TOPK_SELECTOR:-} ALLOCATOR_TOPK_UNIT=${ALLOCATOR_TOPK_UNIT:-}"
 echo "extra_kwargs: ${extra_kwargs}"
 echo "log_file: ${log_file}"
 echo "output_path: ${output_path}"

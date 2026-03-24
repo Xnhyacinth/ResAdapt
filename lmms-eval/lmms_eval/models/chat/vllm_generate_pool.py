@@ -64,19 +64,19 @@ class VLLMGeneratePool(VLLMChat):
         **kwargs,
     ):  
         ###
-        # self.predictor = None
-        # predictor_path = os.path.join(model, "pred")
-        # if os.path.exists(predictor_path):
-        self.predictor_path = os.getenv("PREDICTOR_PATH", None)
+        # self.allocator = None
+        # allocator_path = os.path.join(model, "pred")
+        # if os.path.exists(allocator_path):
+        self.allocator_path = os.getenv("ALLOCATOR_PATH", None)
         enable_baseline_scale = os.environ.get("ENABLE_BASELINE_SCALE", None)
-        if self.predictor_path is not None or enable_baseline_scale is not None:
-            print(f"[VLLMGenerateCustom] Found predictor at {self.predictor_path}, loading... and patching...")
+        if self.allocator_path is not None or enable_baseline_scale is not None:
+            print(f"[VLLMGenerateCustom] Found allocator at {self.allocator_path}, loading... and patching...")
             print(f"[VLLMGenerateCustom] Found enable_baseline_scale: {enable_baseline_scale}")
 
             from resadapt.allocator.multi_model_limit import MultiGPUInferPool
 
             self.pool = MultiGPUInferPool(
-                model_path=self.predictor_path,
+                model_path=self.allocator_path,
                 num_gpus=8,
                 enable_batch=False,
                 microbatch_ms=10,
@@ -87,7 +87,7 @@ class VLLMGeneratePool(VLLMChat):
             )
             self.pool.start()
             
-        #     # os.environ["PREDICTOR_PATH"] = predictor_path
+        #     # os.environ["ALLOCATOR_PATH"] = allocator_path
         #     from resadapt.utils.utils import _apply_hf_processor_main, __init__
         #     import vllm.model_executor.models.qwen2_5_vl
         #     from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VLMultiModalProcessor
@@ -97,26 +97,26 @@ class VLLMGeneratePool(VLLMChat):
 
             # import resadapt.allocator.vllm_patch
             # from transformers import AutoConfig, AutoModel
-            # from resadapt.allocator.modeling_predictor import PredictorForConditionalGeneration
+            # from resadapt.allocator.modeling_allocator import AllocatorForConditionalGeneration
             
-            # # config = AutoConfig.from_pretrained(predictor_path, trust_remote_code=True)
-            # self.predictor = PredictorForConditionalGeneration.from_pretrained(
-            #     predictor_path,
+            # # config = AutoConfig.from_pretrained(allocator_path, trust_remote_code=True)
+            # self.allocator = AllocatorForConditionalGeneration.from_pretrained(
+            #     allocator_path,
             #     dtype="auto",
             #     device_map="auto",
             #     attn_implementation="flash_attention_2",
             #     trust_remote_code=True
             # )
-            # self.predictor.eval() # Eval mode for memory efficiency
+            # self.allocator.eval() # Eval mode for memory efficiency
 
 
-            # PREDICTOR_URL = "http://localhost:8000/init" 
+            # ALLOCATOR_URL = "http://localhost:8000/init" 
             # os.environ["no_proxy"] = "*" 
-            # payload = {"predictor_path": self.predictor_path,}
+            # payload = {"allocator_path": self.allocator_path,}
 
             # try:
             #     response = requests.post(
-            #         PREDICTOR_URL, 
+            #         ALLOCATOR_URL, 
             #         json=payload, 
             #         timeout=120,
             #     )
@@ -124,10 +124,10 @@ class VLLMGeneratePool(VLLMChat):
             #     response.raise_for_status()
             #     result = response.json()
                 
-            #     print(f"Predictor response: {result}")
+            #     print(f"Allocator response: {result}")
                 
             # except Exception as e:
-            #     print(f"❌ Remote predictor init failed: {e}")
+            #     print(f"❌ Remote allocator init failed: {e}")
             #     raise e
         ###
 
@@ -141,7 +141,7 @@ class VLLMGeneratePool(VLLMChat):
     ###
     def _scale_multi_modal(self, messages, text, images, videos):
         """
-        Use Predictor to predict the best resolution (Scale) and resize Image and Video Frames.
+        Use Allocator to predict the best resolution (Scale) and resize Image and Video Frames.
         Now supports batch processing and uses standard verl preprocessing flow.
         """
         payload = {
@@ -300,7 +300,7 @@ class VLLMGeneratePool(VLLMChat):
             video_metadatas = None
         
         scale = 1.0
-        if self.predictor_path is not None:
+        if self.allocator_path is not None:
             text, images, video_inputs, scale = self._scale_multi_modal(messages, text, images, video_inputs)
             
             # breakpoint()

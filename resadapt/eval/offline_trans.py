@@ -237,7 +237,7 @@ def _flops_thop(model: Any, inputs: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return {"flops": float(flops), "params": float(params), "keys": list(keys)}
 
 
-def _flops_thop_predictor(predictor: Any, hf_messages: Any) -> Optional[Dict[str, Any]]:
+def _flops_thop_allocator(allocator: Any, hf_messages: Any) -> Optional[Dict[str, Any]]:
     try:
         from thop import profile as thop_profile
     except Exception:
@@ -252,7 +252,7 @@ def _flops_thop_predictor(predictor: Any, hf_messages: Any) -> Optional[Dict[str
         def forward(self, _dummy):
             return self.m(messages=[self.msg], eval_mode=True, return_mm_data=False)
 
-    wrapped = _Wrapped(predictor, hf_messages)
+    wrapped = _Wrapped(allocator, hf_messages)
     dummy = torch.zeros(1, device="cuda" if torch.cuda.is_available() else "cpu")
     try:
         flops, params = thop_profile(wrapped, inputs=(dummy,), verbose=False)
@@ -571,8 +571,8 @@ def _uniform_scale_video(frames, *, scale: float, image_factor: int):
     raise TypeError(f"unsupported frames type for --uniform-scale: {type(frames)}")
 
 
-def _load_predictor_on_gpu0(
-    predictor_path: str,
+def _load_allocator_on_gpu0(
+    allocator_path: str,
     *,
     max_frames: Optional[int],
     max_scale_override: Optional[float],
@@ -582,7 +582,7 @@ def _load_predictor_on_gpu0(
         torch.cuda.set_device(0)
     except Exception:
         pass
-    config = AutoConfig.from_pretrained(predictor_path, trust_remote_code=True)
+    config = AutoConfig.from_pretrained(allocator_path, trust_remote_code=True)
     if max_frames is not None:
         try:
             max_frames_val = int(max_frames)
@@ -600,15 +600,15 @@ def _load_predictor_on_gpu0(
             setattr(config, "min_scale", float(min_scale_override))
         except Exception:
             pass
-    predictor = AutoModel.from_pretrained(
-        predictor_path,
+    allocator = AutoModel.from_pretrained(
+        allocator_path,
         config=config,
         dtype="auto",
         device_map={"": 0},
         trust_remote_code=True,
     )
-    predictor.eval()
-    return predictor
+    allocator.eval()
+    return allocator
 
 
 def _prepare_inputs(
@@ -667,7 +667,7 @@ def main():
     parser.add_argument("--model", type=str, default=os.getenv("HF_MODEL", "Qwen/Qwen2.5-VL-7B-Instruct"))
     parser.add_argument("--video", type=str, default=os.getenv("VIDEO_PATH", ""))
     parser.add_argument("--prompt", type=str, default=os.getenv("VIDEO_PROMPT", "Describe the video briefly."))
-    parser.add_argument("--predictor-path", type=str, default=os.getenv("PREDICTOR_PATH", ""))
+    parser.add_argument("--allocator-path", type=str, default=os.getenv("ALLOCATOR_PATH", ""))
     parser.add_argument("--runs", type=int, default=int(os.getenv("RUNS", "20")))
     parser.add_argument("--warmup", type=int, default=int(os.getenv("WARMUP", "2")))
 
@@ -715,42 +715,42 @@ def main():
 
     scales_list = None
     masks_list = None
-    predictor_load_s = None
+    allocator_load_s = None
     scale_s_list = None
 
-    if args.predictor_path:
+    if args.allocator_path:
         t_load0 = time.time()
-        predictor = _load_predictor_on_gpu0(
-            args.predictor_path,
+        allocator = _load_allocator_on_gpu0(
+            args.allocator_path,
             max_frames=args.max_frames,
             max_scale_override=args.max_scale,
             min_scale_override=args.min_scale,
         )
         t_load1 = time.time()
-        predictor_load_s = t_load1 - t_load0
+        allocator_load_s = t_load1 - t_load0
 
-        max_scale = float(getattr(predictor.config, "max_scale", 2.0))
-        min_scale = float(getattr(predictor.config, "min_scale", 0.25))
-        use_discrete_action = bool(getattr(predictor.config, "use_discrete_action", False))
-        discrete_step = float(getattr(predictor.config, "discrete_step", 0.25))
+        max_scale = float(getattr(allocator.config, "max_scale", 2.0))
+        min_scale = float(getattr(allocator.config, "min_scale", 0.25))
+        use_discrete_action = bool(getattr(allocator.config, "use_discrete_action", False))
+        discrete_step = float(getattr(allocator.config, "discrete_step", 0.25))
 
         for _ in range(max(0, int(args.warmup))):
             with torch.inference_mode():
-                _ = predictor(messages=[hf_messages], eval_mode=True, return_mm_data=False)
+                _ = allocator(messages=[hf_messages], eval_mode=True, return_mm_data=False)
 
         if bool(args.profile) and str(args.profile_mode) == "profiler":
             _profile_torch_callable(
-                "predictor_forward",
-                lambda: predictor(messages=[hf_messages], eval_mode=True, return_mm_data=False),
+                "allocator_forward",
+                lambda: allocator(messages=[hf_messages], eval_mode=True, return_mm_data=False),
                 topk=int(args.profile_topk),
             )
         if bool(args.profile) and str(args.profile_mode) == "thop":
-            res = _flops_thop_predictor(predictor, hf_messages)
+            res = _flops_thop_allocator(allocator, hf_messages)
             if res is None:
-                out = {"tag": "predictor_forward", "mode": "thop_forward", "ok": False, "reason": "thop_unavailable_or_failed"}
+                out = {"tag": "allocator_forward", "mode": "thop_forward", "ok": False, "reason": "thop_unavailable_or_failed"}
             else:
                 out = {
-                    "tag": "predictor_forward",
+                    "tag": "allocator_forward",
                     "mode": "thop_forward",
                     "flops": float(res["flops"]),
                     "tflops_total_est": float(res["flops"]) / 1e12,
@@ -764,7 +764,7 @@ def main():
         for _ in range(int(args.runs)):
             t0 = time.time()
             with torch.inference_mode():
-                out = predictor(messages=[hf_messages], eval_mode=True, return_mm_data=False)
+                out = allocator(messages=[hf_messages], eval_mode=True, return_mm_data=False)
             scales_cpu, mask_cpu, _ = compute_scales_and_sample_means_cpu(
                 out,
                 max_scale=max_scale,
@@ -779,11 +779,11 @@ def main():
 
         s_mean, s_std = _mean_std(scale_s_list)
         print(
-            f"[predictor] load_s={predictor_load_s:.4f} "
+            f"[allocator] load_s={allocator_load_s:.4f} "
             f"scale_s_mean={s_mean:.4f} scale_s_std={s_std:.4f} runs={len(scale_s_list)}"
         )
 
-        del predictor
+        del allocator
         gc.collect()
         try:
             torch.cuda.empty_cache()

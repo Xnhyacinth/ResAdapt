@@ -301,7 +301,7 @@ def _compute_saliency_target_share(
     return _masked_normalized_share(raw, valid_row, eps=eps)
 
 
-def compute_predictor_advantage(
+def compute_allocator_advantage(
     scores: torch.Tensor,                # (B,) or (B, T)
     uid: np.ndarray,                     # (B,)
     sid: np.ndarray,                     # (B,)
@@ -320,10 +320,10 @@ def compute_predictor_advantage(
     max_scale: float = 2.0,
     rewards: Optional[list] = None,
     centered_term: float = 0.5,
-    frame_metrics: Optional[Dict[str, torch.Tensor]] = None,  # Frame metrics from predictor
+    frame_metrics: Optional[Dict[str, torch.Tensor]] = None,  # Frame metrics from allocator
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Compute predictor advantages.
+    Compute allocator advantages.
 
     Pipeline (GDPO-consistent):
       - Group by uid (prompt-group)
@@ -333,8 +333,8 @@ def compute_predictor_advantage(
       - Expand to per-object advantage via scale_mask if provided
 
     Returns:
-      predictor_advantages: (B, Tobj) if scale_mask else (B,)
-      predictor_update_mask: (B,) bool
+      allocator_advantages: (B, Tobj) if scale_mask else (B,)
+      allocator_update_mask: (B,) bool
     """
     device = scores.device
     dtype = scores.dtype
@@ -955,7 +955,7 @@ def compute_predictor_advantage(
                 advs = _hadw_reweight_advantages(advs, difficulty, use_cost_l=use_cost_l, epsilon=epsilon)
                 custom_adv_calculated = True
 
-            # --- Frame-Aware Advantage: uses predictor frame metrics ---
+            # --- Frame-Aware Advantage: uses allocator frame metrics ---
             elif "frameaware" in use_cost_l:
                 base_signal = current_accs if "acc" in use_cost_l else s_scores_tensor.float()
                 base_adv = _group_zscore(base_signal, eps=epsilon)
@@ -1397,7 +1397,7 @@ def compute_predictor_advantage(
             sid2advantage[sids_list[k]] = val.to(device=device, dtype=dtype)
 
     adv_base = torch.zeros((bsz,), dtype=dtype, device=device)
-    predictor_update_mask = torch.zeros((bsz,), dtype=torch.bool, device=device)
+    allocator_update_mask = torch.zeros((bsz,), dtype=torch.bool, device=device)
 
     seen_sids = set()
     for i in range(bsz):
@@ -1411,14 +1411,14 @@ def compute_predictor_advantage(
                 should_update = False
             else:
                 seen_sids.add(s_key)
-        predictor_update_mask[i] = bool(should_update)
+        allocator_update_mask[i] = bool(should_update)
 
     sid2norm: Dict[Any, torch.Tensor] = {}
 
     # ---- Batch-wise normalization (Eq.6), over unique sid by default ----
     if batch_norm_adv:
         if filter_invalid_sid:
-            idx = predictor_update_mask.nonzero(as_tuple=False).view(-1)
+            idx = allocator_update_mask.nonzero(as_tuple=False).view(-1)
             if idx.numel() > 0:
                 norm_vals = _batch_zscore(adv_base[idx].float(), eps=epsilon).to(dtype)
                 adv_base[idx] = norm_vals
@@ -1453,23 +1453,23 @@ def compute_predictor_advantage(
 
     if scale_mask is not None:
         if per_sid_frame_adv_all:
-            predictor_advantages = torch.zeros_like(scale_mask, dtype=dtype)
+            allocator_advantages = torch.zeros_like(scale_mask, dtype=dtype)
             for i in range(bsz):
                 s_key = _as_py_key(sid[i])
                 adv_vec = per_sid_frame_adv_all.get(s_key)
-                if adv_vec is None or adv_vec.numel() != predictor_advantages.shape[1]:
-                    predictor_advantages[i] = adv_base[i] * scale_mask[i].float()
+                if adv_vec is None or adv_vec.numel() != allocator_advantages.shape[1]:
+                    allocator_advantages[i] = adv_base[i] * scale_mask[i].float()
                 else:
                     valid_mask = scale_mask[i].to(torch.bool)
-                    predictor_advantages[i] = torch.where(
+                    allocator_advantages[i] = torch.where(
                         valid_mask,
                         adv_vec.to(device=device, dtype=dtype),
                         torch.zeros_like(adv_vec, dtype=dtype),
                     )
         else:
-            predictor_advantages = adv_base.unsqueeze(-1) * scale_mask.float()
-        predictor_advantages = predictor_advantages.to(dtype=dtype)
+            allocator_advantages = adv_base.unsqueeze(-1) * scale_mask.float()
+        allocator_advantages = allocator_advantages.to(dtype=dtype)
     else:
-        predictor_advantages = adv_base
+        allocator_advantages = adv_base
 
-    return predictor_advantages, predictor_update_mask
+    return allocator_advantages, allocator_update_mask

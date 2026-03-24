@@ -543,8 +543,8 @@ class DataParallelPPOActor(BasePPOActor):
 
         ###
         is_pred = data.meta_info.pop("is_pred", False)
-        if is_pred and "predictor_log_probs" in data.batch.keys():
-            select_keys.extend(["predictor_log_probs", "predictor_old_log_probs", "scale_mask"])
+        if is_pred and "allocator_log_probs" in data.batch.keys():
+            select_keys.extend(["allocator_log_probs", "allocator_old_log_probs", "scale_mask"])
 
         if "scale_one_mask" in data.non_tensor_batch.keys():
             non_tensor_select_keys.append("scale_one_mask")
@@ -584,14 +584,14 @@ class DataParallelPPOActor(BasePPOActor):
                     advantages = model_inputs["advantages"]
 
                     ###
-                    if is_pred and "predictor_log_probs" in model_inputs.keys():
+                    if is_pred and "allocator_log_probs" in model_inputs.keys():
                         print("cal negative_approx_kl for dp actor!")
-                        predictor_old_log_prob = model_inputs["predictor_old_log_probs"]
-                        predictor_log_prob = model_inputs["predictor_log_probs"]
+                        allocator_old_log_prob = model_inputs["allocator_old_log_probs"]
+                        allocator_log_prob = model_inputs["allocator_log_probs"]
                         scale_mask = model_inputs.get("scale_mask", None)
                         scale_one_mask = model_inputs.get("scale_one_mask", None)
 
-                        negative_approx_kl = predictor_log_prob - predictor_old_log_prob
+                        negative_approx_kl = allocator_log_prob - allocator_old_log_prob
                         if scale_one_mask is not None:
                             scale_one_mask_tensor = torch.as_tensor(
                                 scale_one_mask, device=negative_approx_kl.device, dtype=torch.bool

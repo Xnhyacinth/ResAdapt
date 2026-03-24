@@ -37,7 +37,7 @@ algorithm:
   use_hadw_in_grpo: False
   scale_multi_modal_data: null
 
-predictor:
+allocator:
   enable: False
   enable_resource_pool: False
   dedicated_8gpu: False
@@ -59,7 +59,7 @@ predictor:
     # max_scale: 3.0
     path: null
     # scale_multi_modal_data: null
-    # predictor_lr: 1e-5
+    # allocator_lr: 1e-5
     # scale_n: 1
   actor:
     optim:
@@ -75,13 +75,13 @@ actor_rollout_ref:
   scale_n: 1
   # actor:
     # scale_multi_modal_data: False
-    # predictor_lr: 1e-5
+    # allocator_lr: 1e-5
     # scale_n: 1
   # model:
     # min_scale: 0.25
     # max_scale: 3.0
     # scale_multi_modal_data: null
-    # predictor_lr: 1e-5
+    # allocator_lr: 1e-5
     # scale_n: 1
 # actor_rollout_ref:
 #   actor:

@@ -63,16 +63,16 @@ class VLLMGenerateRemote(VLLMChat):
         **kwargs,
     ):  
         ###
-        # self.predictor = None
-        # predictor_path = os.path.join(model, "pred")
-        # if os.path.exists(predictor_path):
-        self.predictor_path = os.getenv("PREDICTOR_PATH", None)
+        # self.allocator = None
+        # allocator_path = os.path.join(model, "pred")
+        # if os.path.exists(allocator_path):
+        self.allocator_path = os.getenv("ALLOCATOR_PATH", None)
         enable_baseline_scale = os.environ.get("ENABLE_BASELINE_SCALE", None)
-        # if self.predictor_path is not None or enable_baseline_scale is not None:
-        #     print(f"[VLLMGenerateCustom] Found predictor at {self.predictor_path}, loading... and patching...")
+        # if self.allocator_path is not None or enable_baseline_scale is not None:
+        #     print(f"[VLLMGenerateCustom] Found allocator at {self.allocator_path}, loading... and patching...")
         #     print(f"[VLLMGenerateCustom] Found enable_baseline_scale: {enable_baseline_scale}")
             
-        #     # os.environ["PREDICTOR_PATH"] = predictor_path
+        #     # os.environ["ALLOCATOR_PATH"] = allocator_path
         #     from resadapt.utils.utils import _apply_hf_processor_main, __init__
         #     import vllm.model_executor.models.qwen2_5_vl
         #     from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VLMultiModalProcessor
@@ -82,26 +82,26 @@ class VLLMGenerateRemote(VLLMChat):
 
             # import resadapt.allocator.vllm_patch
             # from transformers import AutoConfig, AutoModel
-            # from resadapt.allocator.modeling_predictor import PredictorForConditionalGeneration
+            # from resadapt.allocator.modeling_allocator import AllocatorForConditionalGeneration
             
-            # # config = AutoConfig.from_pretrained(predictor_path, trust_remote_code=True)
-            # self.predictor = PredictorForConditionalGeneration.from_pretrained(
-            #     predictor_path,
+            # # config = AutoConfig.from_pretrained(allocator_path, trust_remote_code=True)
+            # self.allocator = AllocatorForConditionalGeneration.from_pretrained(
+            #     allocator_path,
             #     dtype="auto",
             #     device_map="auto",
             #     attn_implementation="flash_attention_2",
             #     trust_remote_code=True
             # )
-            # self.predictor.eval() # Eval mode for memory efficiency
+            # self.allocator.eval() # Eval mode for memory efficiency
 
 
-            # PREDICTOR_URL = "http://localhost:8000/init" 
+            # ALLOCATOR_URL = "http://localhost:8000/init" 
             # os.environ["no_proxy"] = "*" 
-            # payload = {"predictor_path": self.predictor_path,}
+            # payload = {"allocator_path": self.allocator_path,}
 
             # try:
             #     response = requests.post(
-            #         PREDICTOR_URL, 
+            #         ALLOCATOR_URL, 
             #         json=payload, 
             #         timeout=120,
             #     )
@@ -109,10 +109,10 @@ class VLLMGenerateRemote(VLLMChat):
             #     response.raise_for_status()
             #     result = response.json()
                 
-            #     print(f"Predictor response: {result}")
+            #     print(f"Allocator response: {result}")
                 
             # except Exception as e:
-            #     print(f"❌ Remote predictor init failed: {e}")
+            #     print(f"❌ Remote allocator init failed: {e}")
             #     raise e
         ###
 
@@ -126,12 +126,12 @@ class VLLMGenerateRemote(VLLMChat):
     ###
     def _scale_multi_modal(self, messages, text, images, videos):
         """
-        Use Predictor to predict the best resolution (Scale) and resize Image and Video Frames.
+        Use Allocator to predict the best resolution (Scale) and resize Image and Video Frames.
         Now supports batch processing and uses standard verl preprocessing flow.
         """
         from resadapt.utils.utils import make_messages_serializable, encode_numpy_to_base64
             
-        PREDICTOR_URL = "http://localhost:8000/predict" 
+        ALLOCATOR_URL = "http://localhost:8000/predict" 
         os.environ["no_proxy"] = "*" 
 
          # inputs = self.processor(
@@ -140,10 +140,10 @@ class VLLMGenerateRemote(VLLMChat):
         #     videos=videos,
         #     padding=True,
         #     return_tensors="pt",
-        # ).to(self.predictor.device)
+        # ).to(self.allocator.device)
 
         # inputs.update({"multi_modal_data": [{"image": images, "video": videos}], "text": [text], "eval_mode": True})
-        # scaled_multi_modal_data = self.predictor(**inputs)["multi_modal_data"]
+        # scaled_multi_modal_data = self.allocator(**inputs)["multi_modal_data"]
         
         # payload = {
         #     "text": text,
@@ -162,7 +162,7 @@ class VLLMGenerateRemote(VLLMChat):
         }
 
         try:
-            response = requests.post(PREDICTOR_URL, json=payload, timeout=(10, 3600))
+            response = requests.post(ALLOCATOR_URL, json=payload, timeout=(10, 3600))
             
             response.raise_for_status() 
             result = response.json()
@@ -170,7 +170,7 @@ class VLLMGenerateRemote(VLLMChat):
             scaled_multi_modal_data = result['scaled_multi_modal_data']
             
         except Exception as e:
-            print(f"❌ Remote predictor call failed: {e}")
+            print(f"❌ Remote allocator call failed: {e}")
             raise e
 
         scaled_images, scaled_videos = None, None
@@ -303,7 +303,7 @@ class VLLMGenerateRemote(VLLMChat):
             video_inputs = None
             video_metadatas = None
             
-        if self.predictor_path is not None:
+        if self.allocator_path is not None:
             images, video_inputs = self._scale_multi_modal(messages, text, images, video_inputs)
             
             # breakpoint()

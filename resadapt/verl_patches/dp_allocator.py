@@ -395,7 +395,7 @@ class DataParallelPPOActor(BasePPOActor):
             return outputs
 
     ###
-    @GPUMemoryLogger(role="dp predictor", logger=logger)
+    @GPUMemoryLogger(role="dp allocator", logger=logger)
     def scale_multi_modal(self, data: DataProto, eval_mode=False):
         """
         Batch multi-modal scaling pre-processing:
@@ -480,9 +480,9 @@ class DataParallelPPOActor(BasePPOActor):
                                 scales[scale_one_mask_tensor] = 1.0
                                 scaled_inputs["scales"] = scales
 
-                # Write back tensor fields; rename 'log_probs' -> 'predictor_old_log_probs'
+                # Write back tensor fields; rename 'log_probs' -> 'allocator_old_log_probs'
                 tensor_updates = {
-                    (key if key != "log_probs" else "predictor_old_log_probs"): value
+                    (key if key != "log_probs" else "allocator_old_log_probs"): value
                     for key, value in scaled_inputs.items()
                     if isinstance(value, torch.Tensor)
                 }
@@ -533,12 +533,12 @@ class DataParallelPPOActor(BasePPOActor):
                 compute_frame_metrics=compute_frame_metrics,
                 # return_pred_extras=return_pred_extras,
             )
-            predictor_log_probs = scaled_inputs['log_probs']
+            allocator_log_probs = scaled_inputs['log_probs']
 
-        return predictor_log_probs, scaled_inputs
+        return allocator_log_probs, scaled_inputs
 
     @torch.no_grad()
-    def collect_predictor_log_probs(self, data: DataProto, *, video2list: bool = False, video2image: bool = False):
+    def collect_allocator_log_probs(self, data: DataProto, *, video2list: bool = False, video2image: bool = False):
         was_training = self.actor_module.training
         self.actor_module.eval()
         try:
@@ -555,7 +555,7 @@ class DataParallelPPOActor(BasePPOActor):
             else:
                 micro_batch_size = max(int(self.config.ppo_micro_batch_size_per_gpu), 1)
                 micro_batches = eval_data.split(micro_batch_size)
-            predictor_log_probs = []
+            allocator_log_probs = []
             for micro_batch in micro_batches:
                 micro_batch = micro_batch.to(get_device_id())
                 model_inputs = {
@@ -566,11 +566,11 @@ class DataParallelPPOActor(BasePPOActor):
                     "compute_frame_metrics": False,
                 }
                 log_prob, _ = self.compute_pred_log_prob(model_inputs)
-                predictor_log_probs.append(log_prob.detach().to("cpu"))
+                allocator_log_probs.append(log_prob.detach().to("cpu"))
 
-            if not predictor_log_probs:
+            if not allocator_log_probs:
                 return torch.empty((0,), dtype=torch.float32)
-            return torch.cat(predictor_log_probs, dim=0)
+            return torch.cat(allocator_log_probs, dim=0)
         finally:
             self.actor_module.train(was_training)
     ###
@@ -608,7 +608,7 @@ class DataParallelPPOActor(BasePPOActor):
 
         return grad_norm
 
-    @GPUMemoryLogger(role="dp predictor", logger=logger)
+    @GPUMemoryLogger(role="dp allocator", logger=logger)
     def update_policy(self, data: DataProto):
         # make sure we are in training mode
         self.actor_module.train()
@@ -656,7 +656,7 @@ class DataParallelPPOActor(BasePPOActor):
         # print(data.batch.keys())
         # print(data.batch['actions'].shape)
         select_keys.extend(
-            ["actions", "predictor_old_log_probs", "scale_mask", "predictor_advantages", "predictor_update_mask"]
+            ["actions", "allocator_old_log_probs", "scale_mask", "allocator_advantages", "allocator_update_mask"]
         )
         non_tensor_select_keys.extend(["ori_prompt"])
         ###
@@ -669,10 +669,10 @@ class DataParallelPPOActor(BasePPOActor):
         on_policy = len(mini_batches) == 1 and self.config.ppo_epochs == 1
 
         metrics = {
-            "predictor/pg_loss": 0.0,
-            "predictor/kl_loss": 0.0,
-            "predictor/sim_loss": 0.0,
-            "predictor/contrastive_loss": 0.0,
+            "allocator/pg_loss": 0.0,
+            "allocator/kl_loss": 0.0,
+            "allocator/sim_loss": 0.0,
+            "allocator/contrastive_loss": 0.0,
         }
         ###
         frame_metrics_acc = {}
@@ -704,16 +704,16 @@ class DataParallelPPOActor(BasePPOActor):
                     model_inputs["video2image"] = video2image
                     model_inputs["compute_frame_metrics"] = compute_frame_metrics
                     response_mask = model_inputs.get("scale_mask", model_inputs["response_mask"])
-                    predictor_update_mask = model_inputs.get("predictor_update_mask", None)
-                    if predictor_update_mask is not None:
+                    allocator_update_mask = model_inputs.get("allocator_update_mask", None)
+                    if allocator_update_mask is not None:
                         if response_mask is None:
-                            response_mask = predictor_update_mask
+                            response_mask = allocator_update_mask
                         else:
-                            if predictor_update_mask.dim() < response_mask.dim():
-                                predictor_update_mask = predictor_update_mask.unsqueeze(-1).expand_as(response_mask)
-                            response_mask = response_mask & predictor_update_mask
-                    old_log_prob = model_inputs.get("predictor_old_log_probs", None)
-                    advantages = model_inputs.get("predictor_advantages", None)
+                            if allocator_update_mask.dim() < response_mask.dim():
+                                allocator_update_mask = allocator_update_mask.unsqueeze(-1).expand_as(response_mask)
+                            response_mask = response_mask & allocator_update_mask
+                    old_log_prob = model_inputs.get("allocator_old_log_probs", None)
+                    advantages = model_inputs.get("allocator_advantages", None)
                     ###
 
                     entropy_coeff = self.config.entropy_coeff
@@ -754,14 +754,14 @@ class DataParallelPPOActor(BasePPOActor):
                     # for fully_async_policy recipe
                     if hasattr(self.config, "use_rollout_log_probs") and self.config.use_rollout_log_probs:
                         ###
-                        old_log_prob = model_inputs["predictor_old_log_probs"]
+                        old_log_prob = model_inputs["allocator_old_log_probs"]
                         ###
                     else:
                         if on_policy:
                             old_log_prob = log_prob.detach()
                         else:
                             ###
-                            old_log_prob = model_inputs["predictor_old_log_probs"]
+                            old_log_prob = model_inputs["allocator_old_log_probs"]
                             ###
 
                     loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
@@ -812,13 +812,13 @@ class DataParallelPPOActor(BasePPOActor):
                     policy_loss = pg_loss
                     if entropy_coeff != 0 and entropy is not None:
                         entropy_agg = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
-                        micro_batch_metrics["predictor/entropy"] = entropy_agg.detach().item()
+                        micro_batch_metrics["allocator/entropy"] = entropy_agg.detach().item()
                         policy_loss -= entropy_agg * entropy_coeff 
 
                     concentration_loss = pred_outputs.get("concentration_loss", None) if pred_outputs else None
                     if concentration_coef != 0 and concentration_loss is not None:
                         policy_loss = policy_loss + concentration_loss * concentration_coef
-                        micro_batch_metrics["predictor/concentration_loss"] = concentration_loss.detach().item()
+                        micro_batch_metrics["allocator/concentration_loss"] = concentration_loss.detach().item()
 
                     # Sim scale loss: similar frames -> later frame lower scale (compress redundancy)
                     # Try to get from model (V2), fallback to local computation (V1)
@@ -849,11 +849,11 @@ class DataParallelPPOActor(BasePPOActor):
                             # Avoid requires_grad check which could cause different code paths
                             # print(f"[sim_loss] value={sim_loss}")
                             policy_loss = policy_loss + sim_loss * sim_scale_coef
-                            metrics["predictor/sim_loss"] += sim_loss.detach().item()
+                            metrics["allocator/sim_loss"] += sim_loss.detach().item()
                             # if sim_loss.requires_grad:
                             #     print(f"[sim_loss] value={sim_loss.item():.6f}, policy_loss={policy_loss.item():.4f}")
 
-                    # Contrastive loss for frame differentiation (V2 predictor)
+                    # Contrastive loss for frame differentiation (V2 allocator)
                     # Read directly from pred_outputs dict (cleaner, FSDP-safe)
                     # contrastive_coef = self.config.get("contrastive_coef", 0.0)
                     if contrastive_coef > 0:
@@ -862,7 +862,7 @@ class DataParallelPPOActor(BasePPOActor):
                         if contrastive_loss is not None and isinstance(contrastive_loss, torch.Tensor):
                             # FSDP-safe: always add loss to ensure consistent backward across ranks
                             policy_loss = policy_loss + contrastive_loss * contrastive_coef
-                            metrics["predictor/contrastive_loss"] += contrastive_loss.detach().item()
+                            metrics["allocator/contrastive_loss"] += contrastive_loss.detach().item()
                             # if contrastive_loss.requires_grad:
                             #     print(f"[contrastive_loss] value={contrastive_loss.item():.6f}")
 
@@ -875,7 +875,7 @@ class DataParallelPPOActor(BasePPOActor):
                         kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
                         policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
-                        metrics["predictor/kl_loss"] += kl_loss.detach().item() * loss_scale_factor
+                        metrics["allocator/kl_loss"] += kl_loss.detach().item() * loss_scale_factor
                         micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
 
                     if self.config.use_dynamic_bsz:
@@ -888,13 +888,13 @@ class DataParallelPPOActor(BasePPOActor):
                     else:
                         loss.backward()
 
-                    metrics["predictor/pg_loss"] += pg_loss.detach().item() * loss_scale_factor
+                    metrics["allocator/pg_loss"] += pg_loss.detach().item() * loss_scale_factor
                     ###
                     # breakpoint()
                     final_metrics = {}
                     for k, v in micro_batch_metrics.items():
                         if k.startswith("actor/"):
-                            new_key = k.replace("actor/", "predictor/")
+                            new_key = k.replace("actor/", "allocator/")
                             final_metrics[new_key] = v
                         else:
                             final_metrics[k] = v
@@ -903,7 +903,7 @@ class DataParallelPPOActor(BasePPOActor):
                     append_to_dict(metrics, micro_batch_metrics)
 
                 grad_norm = self._optimizer_step()
-                mini_batch_metrics = {"predictor/grad_norm": grad_norm.detach().item()}
+                mini_batch_metrics = {"allocator/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, mini_batch_metrics)
         self.actor_optimizer.zero_grad()
         # return metrics
@@ -926,7 +926,7 @@ class DataParallelPPOActor(BasePPOActor):
         # if was_locked and hasattr(data.batch, "unlock_"):
         #     data.batch.unlock_()
             
-        # data.batch["predictor_log_probs"] = torch.cat(predictor_log_probs, dim=0)
+        # data.batch["allocator_log_probs"] = torch.cat(allocator_log_probs, dim=0)
         # data.meta_info["metrics"] = metrics
 
         # if was_locked and hasattr(data.batch, "lock_"):
@@ -935,7 +935,7 @@ class DataParallelPPOActor(BasePPOActor):
         # return data
         ###
 
-    @GPUMemoryLogger(role="dp predictor", logger=logger)
+    @GPUMemoryLogger(role="dp allocator", logger=logger)
     def compute_log_prob(self, data: DataProto, calculate_entropy: bool = False) -> dict[str, torch.Tensor]:
         """Compute the log probability of the responses given input_ids, attention_mask and position_ids
 
