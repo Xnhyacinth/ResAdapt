@@ -65,13 +65,13 @@ Example execution from the repository root:
 
 ```bash
 # Example: 7B model with smol_v2 allocator, FSDP2, 4 nodes
-NNODES=4 nohup bash resadapt/scripts/main.sh 7B scale > logs_run/train_7b.log 2>&1 &
+NNODES=4 nohup bash resadapt/scripts/main.sh Qwen/Qwen2.5-VL-7B-Instruct scale > logs_run/train_7b.log 2>&1 &
 ```
 
 Alternatively, you can use named arguments:
 
 ```bash
-NNODES=4 nohup bash resadapt/scripts/main.sh --model_size 7B --scale_data scale > logs_run/train_7b.log 2>&1 &
+NNODES=4 nohup bash resadapt/scripts/main.sh --model_path Qwen/Qwen2.5-VL-7B-Instruct --scale_data scale > logs_run/train_7b.log 2>&1 &
 ```
 
 ### Evaluation

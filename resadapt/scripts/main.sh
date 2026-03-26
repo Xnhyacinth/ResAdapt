@@ -33,7 +33,7 @@ fi
 # 1. CLI Arguments Parsing
 # ==============================================================================
 # Define default values for script arguments
-MODEL_SIZE="3B"                         # Size of the model (e.g., "3B", "7B")
+MODEL_PATH="Qwen/Qwen2.5-VL-7B-Instruct"  # Path or name of the model
 SCALE_MULTI_MODAL_DATA="scale"          # Configuration tag for multimodal data scaling (e.g., "scale", "base")
 PROMPT_LEN=8                            # Maximum prompt length in thousands (K) of tokens
 RESP_LEN=8                              # Maximum response length in thousands (K) of tokens
@@ -48,7 +48,7 @@ usage() {
     echo "Usage: $0 [OPTIONS]"
     echo ""
     echo "Options:"
-    echo "  --model_size SIZE         Size of the model (e.g., \"3B\", \"7B\") (default: ${MODEL_SIZE})"
+    echo "  --model_path PATH         Path or name of the model (default: ${MODEL_PATH})"
     echo "  --scale_data DATA         Configuration tag for multimodal data scaling (e.g., \"scale\", \"base\") (default: ${SCALE_MULTI_MODAL_DATA})"
     echo "  --prompt_len LEN          Maximum prompt length in thousands (K) of tokens (default: ${PROMPT_LEN})"
     echo "  --resp_len LEN            Maximum response length in thousands (K) of tokens (default: ${RESP_LEN})"
@@ -61,14 +61,14 @@ usage() {
     echo "  -h, --help                Show this help message"
     echo ""
     echo "Note: Positional arguments are also supported for backward compatibility:"
-    echo "  $0 [model_size] [scale_data] [prompt_len] [resp_len] [strategy] [max_scale] [n_resp] [scale_n] [lr] [debug]"
+    echo "  $0 [model_path] [scale_data] [prompt_len] [resp_len] [strategy] [max_scale] [n_resp] [scale_n] [lr] [debug]"
 }
 
 # Parse named arguments or fallback to positional for backward compatibility
 if [[ $# -gt 0 && "$1" == -* ]]; then
     while [[ $# -gt 0 ]]; do
         case $1 in
-            --model_size) MODEL_SIZE="$2"; shift 2 ;;
+            --model_path) MODEL_PATH="$2"; shift 2 ;;
             --scale_data) SCALE_MULTI_MODAL_DATA="$2"; shift 2 ;;
             --prompt_len) PROMPT_LEN="$2"; shift 2 ;;
             --resp_len) RESP_LEN="$2"; shift 2 ;;
@@ -84,7 +84,7 @@ if [[ $# -gt 0 && "$1" == -* ]]; then
     done
 else
     # Fallback to positional arguments
-    MODEL_SIZE=${1:-$MODEL_SIZE}
+    MODEL_PATH=${1:-$MODEL_PATH}
     SCALE_MULTI_MODAL_DATA=${2:-$SCALE_MULTI_MODAL_DATA}
     PROMPT_LEN=${3:-$PROMPT_LEN}
     RESP_LEN=${4:-$RESP_LEN}
@@ -130,8 +130,7 @@ ray_env_args=(
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${WORKING_DIR}"}
 
 # NOTE: Ensure max_position_embeddings in config.json is set to 32768 after downloading from HF
-MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen2.5-VL-${MODEL_SIZE}-Instruct"}
-ALLOCATOR_PATH=${ALLOCATOR_PATH:-"${PROJECT_ROOT}/models/allocator_flash"}
+ALLOCATOR_PATH=${ALLOCATOR_PATH:-"${PROJECT_ROOT}/models/allocator"}
 TRAIN_FILE=${TRAIN_FILE:-"${PROJECT_ROOT}/data/train.parquet"}
 TEST_FILE=${TEST_FILE:-"${PROJECT_ROOT}/data/test.parquet"}
 
