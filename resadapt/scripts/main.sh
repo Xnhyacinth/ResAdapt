@@ -34,30 +34,30 @@ fi
 # ==============================================================================
 # Define default values for script arguments
 MODEL_SIZE="3B"                         # Size of the model (e.g., "3B", "7B")
-SCALE_MULTI_MODAL_DATA="scale_flash"    # Configuration tag for multimodal data scaling
+SCALE_MULTI_MODAL_DATA="scale"          # Configuration tag for multimodal data scaling (e.g., "scale", "base")
 PROMPT_LEN=8                            # Maximum prompt length in thousands (K) of tokens
 RESP_LEN=8                              # Maximum response length in thousands (K) of tokens
 STRATEGY="fsdp2"                        # Distributed training strategy (e.g., "fsdp2", "fsdp")
 MAX_SCALE=2.0                           # Maximum scaling factor for resolution/frames
 N_RESP_PER_PROMPT=2                     # Number of responses to generate per prompt
-SCALE_N=8                               # N factor used in scaling configuration
-LR="1e-5"                               # Learning rate for the actor model
+SCALE_N=8                               # Number of scales to use per prompt
+LR="1e-5"                               # Learning rate for the allocator model
 DEBUG="0"                               # Debug mode flag (0 for off, 1 for on)
 
 usage() {
     echo "Usage: $0 [OPTIONS]"
     echo ""
     echo "Options:"
-    echo "  --model_size SIZE         Model size (default: ${MODEL_SIZE})"
-    echo "  --scale_data DATA         Scale multimodal data config (default: ${SCALE_MULTI_MODAL_DATA})"
-    echo "  --prompt_len LEN          Max prompt length in K (default: ${PROMPT_LEN})"
-    echo "  --resp_len LEN            Max response length in K (default: ${RESP_LEN})"
-    echo "  --strategy STRATEGY       FSDP strategy (default: ${STRATEGY})"
-    echo "  --max_scale SCALE         Max scale factor (default: ${MAX_SCALE})"
-    echo "  --n_resp N                Number of responses per prompt (default: ${N_RESP_PER_PROMPT})"
-    echo "  --scale_n N               Scale N factor (default: ${SCALE_N})"
-    echo "  --lr LR                   Learning rate (default: ${LR})"
-    echo "  --debug 0/1               Enable debug mode (default: ${DEBUG})"
+    echo "  --model_size SIZE         Size of the model (e.g., \"3B\", \"7B\") (default: ${MODEL_SIZE})"
+    echo "  --scale_data DATA         Configuration tag for multimodal data scaling (e.g., \"scale\", \"base\") (default: ${SCALE_MULTI_MODAL_DATA})"
+    echo "  --prompt_len LEN          Maximum prompt length in thousands (K) of tokens (default: ${PROMPT_LEN})"
+    echo "  --resp_len LEN            Maximum response length in thousands (K) of tokens (default: ${RESP_LEN})"
+    echo "  --strategy STRATEGY       Distributed training strategy (e.g., \"fsdp2\", \"fsdp\") (default: ${STRATEGY})"
+    echo "  --max_scale SCALE         Maximum scaling factor for resolution/frames (default: ${MAX_SCALE})"
+    echo "  --n_resp N                Number of responses to generate per prompt (default: ${N_RESP_PER_PROMPT})"
+    echo "  --scale_n N               Number of scales to use per prompt (default: ${SCALE_N})"
+    echo "  --lr LR                   Learning rate for the allocator model (default: ${LR})"
+    echo "  --debug 0/1               Debug mode flag (0 for off, 1 for on) (default: ${DEBUG})"
     echo "  -h, --help                Show this help message"
     echo ""
     echo "Note: Positional arguments are also supported for backward compatibility:"
