@@ -546,7 +546,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 actor_module = get_peft_model(actor_module, LoraConfig(**lora_config))
 
         self.use_orig_params = fsdp_config.get("use_orig_params", False)
-        if self.config.actor.get("freeze_vision_tower", False):
+        
+        # Check if actor should be frozen based on scale_multi_modal_data config
+        scale_multi_modal_data = self.config.get("scale_multi_modal_data", None)
+        freeze_actor = scale_multi_modal_data and "actor_frozen" in scale_multi_modal_data
+        
+        if self.config.actor.get("freeze_vision_tower", False) or freeze_actor:
             vision_tower = get_vl_model_vision_tower(actor_module)
             if vision_tower is not None:
                 vision_tower.requires_grad_(False)
@@ -556,6 +561,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             else:
                 if self.rank == 0:
                     print("[actor model] No vision tower found.")
+        
+        # Freeze entire actor if specified in scale_multi_modal_data
+        if freeze_actor:
+            self.use_orig_params = True
+            actor_module.requires_grad_(False)
+            if self.rank == 0:
+                print("[actor model] Actor is set to frozen (scale_multi_modal_data contains 'actor_frozen').")
 
         # Apply QAT before FSDP wrapping (actor only)
         if role == "actor" and self._qat_enabled:
@@ -2171,8 +2183,9 @@ class AllocatorWorker(Worker, DistProfilerExtension):
                     print("[actor model] No vision tower found.")
 
         ###
+        # Check if allocator should be trained while other parts are frozen
         scale_multi_modal_data = self.config.get("scale_multi_modal_data", None)
-        if "frozen" in scale_multi_modal_data:
+        if scale_multi_modal_data and "allocator_frozen" in scale_multi_modal_data:
             self.use_orig_params = True
             actor_module.requires_grad_(False)
             actor_module.allocator.requires_grad_(True)
@@ -2499,6 +2512,7 @@ class AllocatorWorker(Worker, DistProfilerExtension):
                         "saliency_share_v1",
                         "framepair_v1",
                         "newtie",
+                        "capo",
                         "frame_rank",
                         "frame_ideal",
                         "frameaware",
@@ -2598,6 +2612,7 @@ class AllocatorWorker(Worker, DistProfilerExtension):
                 "saliency_share_v1",
                 "framepair_v1",
                 "newtie",
+                "capo",
                 "frame_rank",
                 "frame_ideal",
                 "frameaware",

@@ -3,6 +3,7 @@ import numpy as np
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from collections import defaultdict
 import re
+import warnings
 
 _HADW_STATE: Dict[str, float] = {}
 _FRAMEPAIR_V1_WARNED = False
@@ -417,7 +418,7 @@ def compute_allocator_advantage(
     per_sid_frame_adv_all: Dict[Any, torch.Tensor] | None = (
         {}
         if use_cost_l is not None
-        and any(key in use_cost_l for key in ("frame_ideal", "frame_rank", "newtie", "framepair_v1", "saliency_share_v1"))
+        and any(key in use_cost_l for key in ("capo", "framepair_v1", "saliency_share_v1"))
         and scale_mask is not None
         and scales is not None
         else None
@@ -706,14 +707,27 @@ def compute_allocator_advantage(
 
                 custom_adv_calculated = True
 
-            # --- TIE: base(normed) + bonus(abs) ---
-            elif "tie" in use_cost_l:
+            elif "capo" in use_cost_l:
                 base_signal = current_accs if "acc" in use_cost_l else s_scores_tensor.float()
                 base_adv = _group_zscore(base_signal, eps=epsilon)
                 difficulty = (1.0 - current_accs).clamp(0.0, 1.0)
                 base_adv = _hadw_reweight_advantages(base_adv, difficulty, use_cost_l=use_cost_l, epsilon=epsilon)
 
-                if "newtie" in use_cost_l:
+                default_knob_tokens = (
+                    "alpha",
+                    "tau",
+                    "gas",
+                    "accpow",
+                    "accfloor",
+                    "wrongscale",
+                    "rightscale",
+                    "scalecap",
+                    "noclamp",
+                )
+                default_knobs = ("capo" in use_cost_l) and (not any(t in use_cost_l for t in default_knob_tokens))
+                default_noclamp = default_knobs
+
+                if "capo" in use_cost_l:
                     alpha_match = re.search(r"alpha([0-9]*\.?[0-9]+)", use_cost_l)
                     alpha = float(alpha_match.group(1)) if alpha_match else 0.5
                     alpha = max(0.0, min(1.0, alpha))
@@ -735,15 +749,15 @@ def compute_allocator_advantage(
                     acc_floor = max(0.0, min(1.0, acc_floor))
 
                     wrongscale_match = re.search(r"wrongscale([0-9]*\.?[0-9]+)", use_cost_l)
-                    wrong_scale = float(wrongscale_match.group(1)) if wrongscale_match else 1.0
+                    wrong_scale = float(wrongscale_match.group(1)) if wrongscale_match else (1.2 if default_knobs else 1.0)
                     wrong_scale = max(0.0, wrong_scale)
 
                     rightscale_match = re.search(r"rightscale([0-9]*\.?[0-9]+)", use_cost_l)
-                    right_scale = float(rightscale_match.group(1)) if rightscale_match else 1.0
+                    right_scale = float(rightscale_match.group(1)) if rightscale_match else (0.9 if default_knobs else 1.0)
                     right_scale = max(0.0, right_scale)
 
                     scalecap_match = re.search(r"scalecap([0-9]*\.?[0-9]+)", use_cost_l)
-                    scale_cap = float(scalecap_match.group(1)) if scalecap_match else 0.0
+                    scale_cap = float(scalecap_match.group(1)) if scalecap_match else (0.25 if default_knobs else 0.0)
                     scale_cap = max(0.0, scale_cap)
 
                     acc_weight = current_accs.clamp(0.0, 1.0).pow(acc_pow).clamp(min=acc_floor)
@@ -880,64 +894,9 @@ def compute_allocator_advantage(
                 else:
                     advs = base_adv + efficiency_bonus.to(base_adv.dtype)
 
-                if "newtie" in use_cost_l and is_correct_mask.any() and "noclamp" not in use_cost_l:
+                if is_correct_mask.any() and ("noclamp" not in use_cost_l) and (not default_noclamp):
                     advs = torch.where(is_correct_mask, advs.clamp(min=0.001), advs)
 
-                custom_adv_calculated = True
-
-            elif "simp" in use_cost_l:
-                base_signal = current_accs if "acc" in use_cost_l else s_scores_tensor.float()
-                base_adv = _group_zscore(base_signal, eps=epsilon)
-
-                accpow_match = re.search(r"accpow([0-9]*\.?[0-9]+)", use_cost_l)
-                acc_pow = float(accpow_match.group(1)) if accpow_match else 0.5
-                acc_pow = max(0.0, acc_pow)
-
-                accfloor_match = re.search(r"accfloor([0-9]*\.?[0-9]+)", use_cost_l)
-                acc_floor = float(accfloor_match.group(1)) if accfloor_match else 0.05
-                acc_floor = max(0.0, min(1.0, acc_floor))
-
-                acc_weight = current_accs.clamp(0.0, 1.0).pow(acc_pow).clamp(min=acc_floor)
-                difficulty = (1.0 - current_accs).clamp(0.0, 1.0)
-
-                wrongpow_match = re.search(r"wrongpow([0-9]*\.?[0-9]+)", use_cost_l)
-                wrong_pow = float(wrongpow_match.group(1)) if wrongpow_match else 1.0
-                wrong_pow = max(0.0, wrong_pow)
-                wrong_weight = difficulty.pow(wrong_pow)
-
-                ct_match = re.search(r"ct([0-9]*\.?[0-9]+)", use_cost_l)
-                correct_target = float(ct_match.group(1)) if ct_match else float(centered_term)
-                correct_target = max(0.0, min(1.0, correct_target))
-
-                wt_match = re.search(r"wt([0-9]*\.?[0-9]+)", use_cost_l)
-                wrong_target = float(wt_match.group(1)) if wt_match else 0.7
-                wrong_target = max(0.0, min(1.0, wrong_target))
-
-                kcorr_match = re.search(r"kcorr([0-9]*\.?[0-9]+)", use_cost_l)
-                k_corr = float(kcorr_match.group(1)) if kcorr_match else 1.0
-                k_corr = max(0.0, k_corr)
-
-                kwrong_match = re.search(r"kwrong([0-9]*\.?[0-9]+)", use_cost_l)
-                k_wrong = float(kwrong_match.group(1)) if kwrong_match else 1.0
-                k_wrong = max(0.0, k_wrong)
-
-                correct_term = -k_corr * acc_weight * (cost_ratio - correct_target).clamp(min=0.0)
-                wrong_term = k_wrong * wrong_weight * (wrong_target - cost_ratio).clamp(min=0.0)
-                scale_shape = torch.where(is_correct_mask, correct_term, wrong_term)
-
-                scalecap_match = re.search(r"scalecap([0-9]*\.?[0-9]+)", use_cost_l)
-                if scalecap_match:
-                    scale_cap = float(scalecap_match.group(1))
-                    scale_cap = max(0.0, scale_cap)
-                    if scale_cap > 0.0:
-                        scale_shape = scale_shape.clamp(min=-scale_cap, max=scale_cap)
-
-                gas_match = re.search(r"gas([0-9]*\\.?[0-9]+)", use_cost_l)
-                gas_tax = float(gas_match.group(1)) if gas_match else 0.05
-                gas_tax = max(0.0, gas_tax)
-
-                advs = base_adv + (encouragement_coef * scale_shape).to(base_adv.dtype) - gas_tax * cost_ratio.to(base_adv.dtype)
-                advs = _hadw_reweight_advantages(advs, difficulty, use_cost_l=use_cost_l, epsilon=epsilon)
                 custom_adv_calculated = True
 
             # --- GDPO (paper-consistent): decoupled group-wise norm, then sum ---
@@ -955,434 +914,6 @@ def compute_allocator_advantage(
                 advs = _hadw_reweight_advantages(advs, difficulty, use_cost_l=use_cost_l, epsilon=epsilon)
                 custom_adv_calculated = True
 
-            # --- Frame-Aware Advantage: uses allocator frame metrics ---
-            elif "frameaware" in use_cost_l:
-                base_signal = current_accs if "acc" in use_cost_l else s_scores_tensor.float()
-                base_adv = _group_zscore(base_signal, eps=epsilon)
-                difficulty = (1.0 - current_accs).clamp(0.0, 1.0)
-                base_adv = _hadw_reweight_advantages(base_adv, difficulty, use_cost_l=use_cost_l, epsilon=epsilon)
-
-                # Parse hyperparameters
-                alpha_match = re.search(r"alpha([0-9]*\.?[0-9]+)", use_cost_l)
-                alpha_redundancy = float(alpha_match.group(1)) if alpha_match else 0.3
-                
-                beta_match = re.search(r"beta([0-9]*\.?[0-9]+)", use_cost_l)
-                beta_uniqueness = float(beta_match.group(1)) if beta_match else 0.2
-                
-                gamma_match = re.search(r"gamma([0-9]*\.?[0-9]+)", use_cost_l)
-                gamma_relevance = float(gamma_match.group(1)) if gamma_match else 0.2
-
-                # Get frame metrics (sid-level aggregation)
-                if frame_metrics is not None and scale_mask is not None:
-                    # print("frame_metrics", frame_metrics)
-                    # Aggregate frame metrics to sid-level
-                    redundancy_avg = _compute_sid_metric_avg(frame_metrics.get("redundancy"), scale_mask, sid, sids_list)
-                    uniqueness_avg = _compute_sid_metric_avg(frame_metrics.get("uniqueness"), scale_mask, sid, sids_list)
-                    relevance_avg = _compute_sid_metric_avg(frame_metrics.get("text_relevance"), scale_mask, sid, sids_list)
-                else:
-                    # Fallback: no frame metrics available
-                    redundancy_avg = torch.zeros(M, device=device, dtype=dtype)
-                    uniqueness_avg = torch.full((M,), 0.5, device=device, dtype=dtype)
-                    relevance_avg = torch.zeros(M, device=device, dtype=dtype)
-
-                # Normalize scale to [0, 1]
-                scales_norm = cost_ratio.clamp(0.0, 1.0)
-
-                # === Frame-Aware Bonus ===
-                # When CORRECT: reward efficiency (small scale on redundant frames)
-                #   bonus = α * redundancy * (1 - scale) - small penalty for large scale on redundant
-                # When WRONG: encourage exploration (larger scale on unique/relevant frames)
-                #   bonus = β * uniqueness * scale + γ * relevance * scale
-
-                correct_bonus = alpha_redundancy * redundancy_avg * (1.0 - scales_norm)
-                wrong_bonus = beta_uniqueness * uniqueness_avg * scales_norm + gamma_relevance * relevance_avg.clamp(0, 1) * scales_norm
-                
-                frame_aware_bonus = torch.where(is_correct_mask, correct_bonus, wrong_bonus)
-                
-                advs = base_adv + (encouragement_coef * frame_aware_bonus).to(base_adv.dtype)
-                
-                # Optional gas tax (penalize scale cost)
-                gas_match = re.search(r"gas([0-9]*\\.?[0-9]+)", use_cost_l)
-                gas_tax = float(gas_match.group(1)) if gas_match else 0.02
-                advs = advs - gas_tax * cost_ratio.to(base_adv.dtype)
-                
-                # Ensure correct answers have non-negative advantage
-                if is_correct_mask.any() and "noclamp" not in use_cost_l:
-                    advs = torch.where(is_correct_mask, advs.clamp(min=0.001), advs)
-                
-                custom_adv_calculated = True
-
-            # --- Frame-New Advantage: improved frame-aware design with symmetric incentives ---
-            elif "frame_new" in use_cost_l:
-                base_signal = current_accs if "acc" in use_cost_l else s_scores_tensor.float()
-                base_adv = _group_zscore(base_signal, eps=epsilon)
-
-                alpha_match = re.search(r"alpha([0-9]*\.?[0-9]+)", use_cost_l)
-                beta_match = re.search(r"beta([0-9]*\.?[0-9]+)", use_cost_l)
-                gamma_match = re.search(r"gamma([0-9]*\.?[0-9]+)", use_cost_l)
-                delta_match = re.search(r"delta([0-9]*\.?[0-9]+)", use_cost_l)
-                alpha_redundancy = float(alpha_match.group(1)) if alpha_match else 0.3
-                beta_uniqueness = float(beta_match.group(1)) if beta_match else 0.5
-                gamma_relevance = float(gamma_match.group(1)) if gamma_match else 0.3
-                delta_info = float(delta_match.group(1)) if delta_match else 0.2
-
-                if frame_metrics is not None and scale_mask is not None:
-                    redundancy = frame_metrics.get("redundancy")
-                    uniqueness = frame_metrics.get("uniqueness")
-                    relevance = frame_metrics.get("text_relevance")
-                    info = frame_metrics.get("info_score")
-                else:
-                    redundancy = None
-                    uniqueness = None
-                    relevance = None
-                    info = None
-
-                def _to01(x, default_val):
-                    if x is None:
-                        return torch.full_like(cost_ratio, default_val)
-                    return x.clamp(0.0, 1.0)
-
-                r = _to01(redundancy, 0.0)
-                u = _to01(uniqueness, 0.5)
-                rel = _to01(((relevance + 1.0) * 0.5) if relevance is not None else None, 0.5)
-                inf = _to01(info, 0.5)
-
-                scales_norm = cost_ratio.clamp(0.0, 1.0)
-                min_s = 0.25
-                max_s = 1.0
-                score = (alpha_redundancy * (1.0 - r) + beta_uniqueness * u + gamma_relevance * rel + delta_info * inf)
-                denom = (alpha_redundancy + beta_uniqueness + gamma_relevance + delta_info + 1e-6)
-                score = score / denom
-                ideal = min_s + score * (max_s - min_s)
-                ideal = ideal.clamp(min_s, max_s)
-
-                delta_h = 0.1
-                diff = scales_norm - ideal
-                abs_diff = diff.abs()
-                huber = torch.where(abs_diff <= delta_h, 0.5 * abs_diff * abs_diff / delta_h, abs_diff - 0.5 * delta_h)
-                bonus = -huber
-
-                is_correct = (s_scores_tensor > 0.35)
-                bonus = torch.where(is_correct, bonus, 0.1 * bonus)
-
-                gas_match = re.search(r"gas([0-9]*\\.?[0-9]+)", use_cost_l)
-                gas_tax = float(gas_match.group(1)) if gas_match else 0.05
-
-                total_cost_penalty = torch.zeros_like(cost_ratio)
-                if "budget" in use_cost_l:
-                    budget_match = re.search(r"budget([0-9]*\.?[0-9]+)", use_cost_l)
-                    budget_target = float(budget_match.group(1)) if budget_match else 1.0
-                    total_cost = scales_norm.mean(dim=-1) if scales_norm.dim() > 0 else scales_norm
-                    total_cost_penalty = F.relu(total_cost - budget_target) * 0.5
-                    if total_cost_penalty.dim() < bonus.dim():
-                        total_cost_penalty = total_cost_penalty.unsqueeze(-1).expand_as(bonus)
-
-                advs = base_adv + (encouragement_coef * bonus).to(base_adv.dtype)
-                advs = advs - gas_tax * cost_ratio.to(base_adv.dtype) - total_cost_penalty.to(base_adv.dtype)
-                advs = advs.clamp(min=-2.0, max=2.0)
-                custom_adv_calculated = True
-            elif "frame_rank" in use_cost_l and frame_metrics is not None and scale_mask is not None and scales is not None:
-                base_signal = current_accs if "acc" in use_cost_l else s_scores_tensor.float()
-                wu_match = re.search(r"wu([0-9]*\.?[0-9]+)", use_cost_l)
-                wr_match = re.search(r"wr([0-9]*\.?[0-9]+)", use_cost_l)
-                wrel_match = re.search(r"wrel([0-9]*\.?[0-9]+)", use_cost_l)
-                winf_match = re.search(r"winf([0-9]*\.?[0-9]+)", use_cost_l)
-                lam_match = re.search(r"lam([0-9]*\.?[0-9]+)", use_cost_l)
-                rho_match = re.search(r"rho([0-9]*\.?[0-9]+)", use_cost_l)
-                eta_match = re.search(r"eta([0-9]*\.?[0-9]+)", use_cost_l)
-                smin_match = re.search(r"smin([0-9]*\.?[0-9]+)", use_cost_l)
-                smax_match = re.search(r"smax([0-9]*\.?[0-9]+)", use_cost_l)
-                deltah_match = re.search(r"delta([0-9]*\.?[0-9]+)", use_cost_l)
-                margin_match = re.search(r"margin([0-9]*\.?[0-9]+)", use_cost_l)
-                krank_match = re.search(r"krank([0-9]+)", use_cost_l)
-                correct_match = re.search(r"correct([0-9]*\.?[0-9]+)", use_cost_l)
-                wrong_eta_match = re.search(r"wrongeta([0-9]*\.?[0-9]+)", use_cost_l)
-                wrongexp_match = re.search(r"wrongexp([0-9]*\.?[0-9]+)", use_cost_l)
-                wu = float(wu_match.group(1)) if wu_match else 1.0
-                wr = float(wr_match.group(1)) if wr_match else 1.0
-                wrel = float(wrel_match.group(1)) if wrel_match else 1.0
-                winf = float(winf_match.group(1)) if winf_match else 0.5
-                lam = float(lam_match.group(1)) if lam_match else 0.5
-                rho = float(rho_match.group(1)) if rho_match else 0.3
-                eta = float(eta_match.group(1)) if eta_match else 0.1
-                smin = float(smin_match.group(1)) if smin_match else 0.25
-                smax = float(smax_match.group(1)) if smax_match else 1.0
-                delta_h = float(deltah_match.group(1)) if deltah_match else 0.1
-                margin = float(margin_match.group(1)) if margin_match else 0.1
-                k_rank = int(krank_match.group(1)) if krank_match else 4
-                correct_th = float(correct_match.group(1)) if correct_match else 0.35
-                wrong_eta = float(wrong_eta_match.group(1)) if wrong_eta_match else 0.3
-                wrong_exp = float(wrongexp_match.group(1)) if wrongexp_match else 0.2
-                sid_index_map: Dict[Any, List[int]] = defaultdict(list)
-                for idx_b in range(bsz):
-                    s_key_b = _as_py_key(sid[idx_b])
-                    sid_index_map[s_key_b].append(idx_b)
-                base_signal_M = base_signal.to(device=device, dtype=base_signal.dtype)
-                base_adv = _group_zscore(base_signal_M, eps=epsilon)
-                per_sid_frame_advs: Dict[Any, torch.Tensor] = {}
-                max_len = int(scale_mask.shape[1])
-                for k, s_key in enumerate(sids_list):
-                    idxs = sid_index_map.get(s_key, [])
-                    if not idxs:
-                        per_sid_frame_advs[s_key] = torch.zeros((max_len,), device=device, dtype=dtype)
-                        continue
-                    valid_row = _compute_sid_frame_valid_mask(scale_mask, idxs)
-                    fm_r = frame_metrics.get("redundancy", None)
-                    fm_u = frame_metrics.get("uniqueness", None)
-                    fm_rel = frame_metrics.get("text_relevance", None)
-                    fm_inf = frame_metrics.get("info_score", None)
-                    r = _aggregate_sid_frame_values(
-                        fm_r,
-                        scale_mask,
-                        idxs,
-                        default=0.0,
-                        device=device,
-                        dtype=dtype,
-                    ) if fm_r is not None else torch.zeros((max_len,), device=device, dtype=dtype)
-                    u = _aggregate_sid_frame_values(
-                        fm_u,
-                        scale_mask,
-                        idxs,
-                        default=0.5,
-                        device=device,
-                        dtype=dtype,
-                    ) if fm_u is not None else torch.full((max_len,), 0.5, device=device, dtype=dtype)
-                    rel_raw = _aggregate_sid_frame_values(
-                        fm_rel,
-                        scale_mask,
-                        idxs,
-                        default=0.0,
-                        device=device,
-                        dtype=dtype,
-                    ) if fm_rel is not None else torch.zeros((max_len,), device=device, dtype=dtype)
-                    inf = _aggregate_sid_frame_values(
-                        fm_inf,
-                        scale_mask,
-                        idxs,
-                        default=0.5,
-                        device=device,
-                        dtype=dtype,
-                    ) if fm_inf is not None else torch.full((max_len,), 0.5, device=device, dtype=dtype)
-                    r = r.clamp(0.0, 1.0)
-                    u = u.clamp(0.0, 1.0)
-                    rel = ((rel_raw + 1.0) * 0.5).clamp(0.0, 1.0)
-                    inf = inf.clamp(0.0, 1.0)
-                    scales_row = _aggregate_sid_frame_values(
-                        scales,
-                        scale_mask,
-                        idxs,
-                        default=min_scale,
-                        device=device,
-                        dtype=dtype,
-                    )
-                    scales01 = ((scales_row - min_scale) / (max_scale - min_scale + 1e-6)).clamp(0.0, 1.0)
-                    imp = wu * u + wrel * rel + winf * inf - wr * r
-                    denom = wu + wrel + winf + wr + 1e-6
-                    imp = (imp / denom).clamp(0.0, 1.0)
-                    ideal01 = (smin + imp * (smax - smin)).clamp(smin, smax)
-                    diff = scales01 - ideal01
-                    abs_diff = diff.abs()
-                    huber = torch.where(abs_diff <= delta_h, 0.5 * abs_diff * abs_diff / delta_h, abs_diff - 0.5 * delta_h)
-                    shape_bonus = -huber
-                    sid_score = current_accs[k] if "acc" in use_cost_l else s_scores_tensor[k]
-                    is_correct = (sid_score > correct_th)
-                    if not is_correct:
-                        shape_bonus = 0.1 * shape_bonus + wrong_exp * imp
-                    shaping = lam * shape_bonus - (eta if is_correct else (eta * wrong_eta)) * scales01
-                    shaping = torch.where(valid_row, shaping, torch.zeros_like(shaping))
-                    count = valid_row.float().sum().clamp(min=1.0)
-                    mean = (shaping * valid_row.float()).sum() / count
-                    var = (((shaping - mean) * valid_row.float()) ** 2).sum() / count
-                    std = (var + 1e-6).sqrt()
-                    shaping = torch.where(valid_row, (shaping - mean) / std, shaping)
-                    rank_vec = torch.zeros_like(scales01)
-                    if k_rank > 0:
-                        valid_idx = torch.nonzero(valid_row, as_tuple=False).flatten()
-                        if valid_idx.numel() >= 2:
-                            perm = valid_idx[torch.randperm(valid_idx.numel(), device=device)]
-                            count_pairs = min(k_rank, perm.numel() // 2)
-                            for j in range(count_pairs):
-                                t1 = perm[j]
-                                t2 = perm[(j + 1) % perm.numel()]
-                                imp_diff = imp[t1] - imp[t2]
-                                sign = torch.sign(imp_diff)
-                                sdiff = scales01[t1] - scales01[t2]
-                                term = F.softplus(margin - sign * sdiff)
-                                if sign > 0:
-                                    rank_vec[t1] = rank_vec[t1] + term
-                                    rank_vec[t2] = rank_vec[t2] - term
-                                elif sign < 0:
-                                    rank_vec[t1] = rank_vec[t1] - term
-                                    rank_vec[t2] = rank_vec[t2] + term
-                            if count_pairs > 0:
-                                rank_vec = rank_vec / float(count_pairs)
-                    adv_vec = torch.where(valid_row, base_adv[k] + shaping - rho * rank_vec, torch.zeros_like(shaping))
-                    per_sid_frame_advs[s_key] = adv_vec
-                    if per_sid_frame_adv_all is not None:
-                        per_sid_frame_adv_all[s_key] = adv_vec
-                frame_adv = torch.stack([per_sid_frame_advs[s_key] for s_key in sids_list], dim=0)
-                valid_mask_M = torch.stack(
-                    [
-                        _compute_sid_frame_valid_mask(scale_mask, sid_index_map.get(s_key, []))
-                        if sid_index_map.get(s_key)
-                        else torch.zeros((max_len,), device=device, dtype=torch.bool)
-                        for s_key in sids_list
-                    ],
-                    dim=0,
-                )
-                denom = valid_mask_M.float().sum(dim=-1).clamp(min=1.0)
-                advs = (frame_adv * valid_mask_M.float()).sum(dim=-1) / denom
-                custom_adv_calculated = True
-            elif "frame_ideal" in use_cost_l and frame_metrics is not None and scale_mask is not None and scales is not None:
-                base_signal = current_accs if "acc" in use_cost_l else s_scores_tensor.float()
-                wu_match = re.search(r"wu([0-9]*\.?[0-9]+)", use_cost_l)
-                wr_match = re.search(r"wr([0-9]*\.?[0-9]+)", use_cost_l)
-                wrel_match = re.search(r"wrel([0-9]*\.?[0-9]+)", use_cost_l)
-                winf_match = re.search(r"winf([0-9]*\.?[0-9]+)", use_cost_l)
-                lam_match = re.search(r"lam([0-9]*\.?[0-9]+)", use_cost_l)
-                eta_match = re.search(r"eta([0-9]*\.?[0-9]+)", use_cost_l)
-                smin_match = re.search(r"smin([0-9]*\.?[0-9]+)", use_cost_l)
-                smax_match = re.search(r"smax([0-9]*\.?[0-9]+)", use_cost_l)
-                deltah_match = re.search(r"delta([0-9]*\.?[0-9]+)", use_cost_l)
-                correct_match = re.search(r"correct([0-9]*\.?[0-9]+)", use_cost_l)
-                wu = float(wu_match.group(1)) if wu_match else 1.0
-                wr = float(wr_match.group(1)) if wr_match else 1.0
-                wrel = float(wrel_match.group(1)) if wrel_match else 1.0
-                winf = float(winf_match.group(1)) if winf_match else 0.5
-                lam = float(lam_match.group(1)) if lam_match else 0.5
-                eta = float(eta_match.group(1)) if eta_match else 0.1
-                smin = float(smin_match.group(1)) if smin_match else 0.25
-                smax = float(smax_match.group(1)) if smax_match else 1.0
-                delta_h = float(deltah_match.group(1)) if deltah_match else 0.1
-                correct_th = float(correct_match.group(1)) if correct_match else 0.35
-                sid_index_map: Dict[Any, List[int]] = defaultdict(list)
-                for idx_b in range(bsz):
-                    s_key_b = _as_py_key(sid[idx_b])
-                    sid_index_map[s_key_b].append(idx_b)
-                base_signal_M = base_signal.to(device=device, dtype=base_signal.dtype)
-                base_adv = _group_zscore(base_signal_M, eps=epsilon)
-                per_sid_frame_advs: Dict[Any, torch.Tensor] = {}
-                max_len = int(scale_mask.shape[1])
-                for k, s_key in enumerate(sids_list):
-                    idxs = sid_index_map.get(s_key, [])
-                    if not idxs:
-                        per_sid_frame_advs[s_key] = torch.zeros((max_len,), device=device, dtype=dtype)
-                        continue
-                    valid_row = _compute_sid_frame_valid_mask(scale_mask, idxs)
-                    fm_r = frame_metrics.get("redundancy", None)
-                    fm_u = frame_metrics.get("uniqueness", None)
-                    fm_rel = frame_metrics.get("text_relevance", None)
-                    fm_inf = frame_metrics.get("info_score", None)
-                    r = _aggregate_sid_frame_values(
-                        fm_r,
-                        scale_mask,
-                        idxs,
-                        default=0.0,
-                        device=device,
-                        dtype=dtype,
-                    ) if fm_r is not None else torch.zeros((max_len,), device=device, dtype=dtype)
-                    u = _aggregate_sid_frame_values(
-                        fm_u,
-                        scale_mask,
-                        idxs,
-                        default=0.5,
-                        device=device,
-                        dtype=dtype,
-                    ) if fm_u is not None else torch.full((max_len,), 0.5, device=device, dtype=dtype)
-                    rel_raw = _aggregate_sid_frame_values(
-                        fm_rel,
-                        scale_mask,
-                        idxs,
-                        default=0.0,
-                        device=device,
-                        dtype=dtype,
-                    ) if fm_rel is not None else torch.zeros((max_len,), device=device, dtype=dtype)
-                    inf = _aggregate_sid_frame_values(
-                        fm_inf,
-                        scale_mask,
-                        idxs,
-                        default=0.5,
-                        device=device,
-                        dtype=dtype,
-                    ) if fm_inf is not None else torch.full((max_len,), 0.5, device=device, dtype=dtype)
-                    # Normalize to [0,1]
-                    r = r.clamp(0.0, 1.0)
-                    u = u.clamp(0.0, 1.0)
-                    rel = ((rel_raw + 1.0) * 0.5).clamp(0.0, 1.0)
-                    inf = inf.clamp(0.0, 1.0)
-                    scales_row = _aggregate_sid_frame_values(
-                        scales,
-                        scale_mask,
-                        idxs,
-                        default=min_scale,
-                        device=device,
-                        dtype=dtype,
-                    )
-                    scales01 = ((scales_row - min_scale) / (max_scale - min_scale + 1e-6)).clamp(0.0, 1.0)
-                    # Importance and ideal scale
-                    imp = wu * u + wrel * rel + winf * inf - wr * r
-                    denom = wu + wrel + winf + wr + 1e-6
-                    imp = (imp / denom).clamp(0.0, 1.0)
-                    ideal01 = (smin + imp * (smax - smin)).clamp(smin, smax)
-                    # Huber shaping
-                    diff = scales01 - ideal01
-                    abs_diff = diff.abs()
-                    huber = torch.where(abs_diff <= delta_h, 0.5 * abs_diff * abs_diff / delta_h, abs_diff - 0.5 * delta_h)
-                    shape_bonus = -huber
-                    sid_score = current_accs[k] if "acc" in use_cost_l else s_scores_tensor[k]
-                    is_correct = (sid_score > correct_th)
-                    shape_bonus = shape_bonus if is_correct else (0.1 * shape_bonus)
-                    shaping = lam * shape_bonus - eta * scales01
-                    shaping = torch.where(valid_row, shaping, torch.zeros_like(shaping))
-                    count = valid_row.float().sum().clamp(min=1.0)
-                    mean = (shaping * valid_row.float()).sum() / count
-                    var = (((shaping - mean) * valid_row.float()) ** 2).sum() / count
-                    std = (var + 1e-6).sqrt()
-                    shaping = torch.where(valid_row, (shaping - mean) / std, shaping)
-                    adv_vec = torch.where(valid_row, base_adv[k] + shaping, torch.zeros_like(shaping))
-                    per_sid_frame_advs[s_key] = adv_vec
-                    if per_sid_frame_adv_all is not None:
-                        per_sid_frame_adv_all[s_key] = adv_vec
-                frame_adv = torch.stack([per_sid_frame_advs[s_key] for s_key in sids_list], dim=0)
-                valid_mask_M = torch.stack(
-                    [
-                        _compute_sid_frame_valid_mask(scale_mask, sid_index_map.get(s_key, []))
-                        if sid_index_map.get(s_key)
-                        else torch.zeros((max_len,), device=device, dtype=torch.bool)
-                        for s_key in sids_list
-                    ],
-                    dim=0,
-                )
-                denom = valid_mask_M.float().sum(dim=-1).clamp(min=1.0)
-                advs = (frame_adv * valid_mask_M.float()).sum(dim=-1) / denom
-                custom_adv_calculated = True
-
-            elif "multiply" in use_cost_l:
-                s_scores_tensor = s_scores_tensor + efficiency_bonus.to(s_scores_tensor.dtype)
-
-            elif "absolute" in use_cost_l:
-                denom = (max_scale - min_scale) + 1e-6
-                waste_ratio = ((costs - min_scale) / denom).clamp(min=0.0, max=1.0)
-                penalty_term = penalty_coef * waste_ratio
-                deduction = current_accs * penalty_term
-                s_scores_tensor = s_scores_tensor - deduction.to(s_scores_tensor.dtype)
-
-            elif "penalty" in use_cost_l:
-                if is_correct_mask.any():
-                    min_effective_cost = costs[is_correct_mask].min()
-                    is_wasteful_mask = (costs > min_effective_cost)
-                    if is_wasteful_mask.any():
-                        waste_amount = (costs - min_effective_cost).clamp(min=0.0)
-                        penalty = penalty_coef * waste_amount
-                        s_scores_tensor = s_scores_tensor - (penalty.to(s_scores_tensor.dtype) * is_wasteful_mask.float())
-
-                    is_insufficient_mask = (costs < min_effective_cost)
-                    if is_insufficient_mask.any():
-                        bonus = encouragement_coef * costs
-                        s_scores_tensor = s_scores_tensor + (bonus.to(s_scores_tensor.dtype) * is_insufficient_mask.float())
-                else:
-                    bonus = encouragement_coef * costs
-                    s_scores_tensor = s_scores_tensor + bonus.to(s_scores_tensor.dtype)
 
         if custom_adv_calculated and use_cost_l is not None and "norm" in use_cost_l:
             advs = _group_zscore(advs, eps=epsilon)

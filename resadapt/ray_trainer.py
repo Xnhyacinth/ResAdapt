@@ -2093,11 +2093,16 @@ class RayPPOTrainer:
                         ###
                         # breakpoint()
                         # print("update actor")
-                        # update actor
-                        with marked_timer("update_actor", timing_raw, color="red"):
-                            actor_output = self._update_actor(batch)
-                        actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
-                        metrics.update(actor_output_metrics)
+                        # update actor (skip if actor is frozen based on scale_multi_modal_data config)
+                        scale_multi_modal_data = str(self.config.get("scale_multi_modal_data", "")).lower()
+                        if scale_multi_modal_data and "actor_frozen" in scale_multi_modal_data:
+                            if self.rank == 0:
+                                print("[trainer] Skipping actor update (actor is frozen).")
+                        else:
+                            with marked_timer("update_actor", timing_raw, color="red"):
+                                actor_output = self._update_actor(batch)
+                            actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
+                            metrics.update(actor_output_metrics)
 
                         # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
                         esi_close_to_expiration = should_save_ckpt_esi(
