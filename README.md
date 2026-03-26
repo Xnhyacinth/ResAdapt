@@ -78,6 +78,7 @@ nohup bash resadapt/scripts/eval.sh Qwen/Qwen2.5-VL-7B-Instruct vllm_generate vi
 
 ## Repository Structure
 
+- `examples/data_preprocess/`: Example scripts and documentation for preprocessing raw video datasets into the standardized Parquet format required for training.
 - `resadapt/allocator/`: Contains the definitions, configurations, and initialization scripts for the lightweight resource allocator.
 - `resadapt/reward_fn/`: Includes reward functions and advantage computations used during RL training (e.g., CAPO and temporal similarity regularizers).
 - `resadapt/scripts/`: Main bash scripts for launching training (`main.sh`) and evaluation (`eval.sh`).
