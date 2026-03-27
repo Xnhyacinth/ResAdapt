@@ -305,13 +305,13 @@ MODEL_NAME=$(basename "${MODEL_PATH}")
 # Extract critical part from model name (e.g., Qwen2.5-VL-7B-Instruct -> Qwen2.5-VL-7B, Llama-3-8B -> Llama-3-8B)
 SHORT_MODEL_NAME=$(echo "$MODEL_NAME" | sed -E 's/-Instruct|-Chat|-Base//g')
 
-exp_name="${SCALE_MULTI_MODAL_DATA}-${STRATEGY}-${SHORT_MODEL_NAME}-bsz${train_prompt_bsz}-mini${train_prompt_mini_bsz}-n${N_RESP_PER_PROMPT}-l${PROMPT_LEN}-r${RESP_LEN}"
+exp_name="${SCALE_MULTI_MODAL_DATA}-${STRATEGY}-${SHORT_MODEL_NAME}-bsz${train_prompt_bsz}-mini${train_prompt_mini_bsz}-n${N_RESP_PER_PROMPT}-nf${NFRAMES}-l${PROMPT_LEN}-r${RESP_LEN}"
 
 if [[ "${SCALE_ENABLE_SCALE}" == "1" ]]; then
     max_prompt_length=${scaled_length}
     use_text=True
     use_discrete_action=False
-    exp_name="${SCALE_MULTI_MODAL_DATA}-${STRATEGY}-s${SCALE_N}-${SHORT_MODEL_NAME}-bsz${train_prompt_bsz}-mini${train_prompt_mini_bsz}-n${N_RESP_PER_PROMPT}-max${MAX_SCALE}-l${PROMPT_LEN}-r${RESP_LEN}"
+    exp_name="${SCALE_MULTI_MODAL_DATA}-${STRATEGY}-s${SCALE_N}-${SHORT_MODEL_NAME}-bsz${train_prompt_bsz}-mini${train_prompt_mini_bsz}-n${N_RESP_PER_PROMPT}-max${MAX_SCALE}-nf${NFRAMES}-l${PROMPT_LEN}-r${RESP_LEN}"
     
     extra_args+=( "+allocator.model.override_config.max_frames=${NFRAMES}" )
     extra_args+=( "algorithm.max_scale=${MAX_SCALE}" )
