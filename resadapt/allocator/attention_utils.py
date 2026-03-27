@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 from typing import Any, Optional
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -148,3 +149,53 @@ def sdpa_scaled_dot_product_attention(
             return _call()
     except (RuntimeError, ValueError, TypeError):
         return _call()
+
+
+def _regularized_beta_cdf(x: torch.Tensor, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Regularized incomplete Beta :math:`I_x(a,b)` (Beta CDF at ``x``)."""
+    betainc = getattr(torch.special, "betainc", None)
+    if betainc is not None:
+        return betainc(x, a, b)
+    try:
+        import scipy.special as scp
+    except ImportError as err:
+        raise RuntimeError(
+            "Beta quantile needs torch.special.betainc (PyTorch) or scipy.special.betainc; "
+            "upgrade PyTorch or install scipy."
+        ) from err
+    x_np = x.detach().float().cpu().numpy()
+    a_np = a.detach().float().cpu().numpy()
+    b_np = b.detach().float().cpu().numpy()
+    cdf = scp.betainc(a_np, b_np, x_np)
+    return torch.as_tensor(np.asarray(cdf), device=x.device, dtype=torch.float32)
+
+
+def beta_regularized_icdf(
+    alpha: torch.Tensor,
+    beta: torch.Tensor,
+    q: float,
+    *,
+    eps: float = 1e-6,
+    max_iter: int = 64,
+) -> torch.Tensor:
+    """Solve :math:`x` such that :math:`I_x(\\alpha,\\beta)=q` (regularized incomplete Beta).
+
+    PyTorch's ``torch.distributions.Beta.icdf`` raises ``NotImplementedError``; this uses
+    bisection on the Beta CDF (``torch.special.betainc`` when available, else SciPy) and
+    matches ``scipy.stats.beta.ppf`` up to numerical tolerance.
+    """
+    qf = float(min(max(q, eps), 1.0 - eps))
+    dtype = alpha.dtype
+    a = alpha.float()
+    b = beta.float()
+    qv = torch.full_like(a, qf)
+    lo = torch.full_like(a, eps)
+    hi = torch.full_like(a, 1.0 - eps)
+    for _ in range(max_iter):
+        mid = (lo + hi) * 0.5
+        cdf = _regularized_beta_cdf(mid, a, b)
+        go_low = cdf < qv
+        lo = torch.where(go_low, mid, lo)
+        hi = torch.where(go_low, hi, mid)
+    out = (lo + hi) * 0.5
+    return out.to(dtype)

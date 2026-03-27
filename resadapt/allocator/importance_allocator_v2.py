@@ -16,7 +16,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from resadapt.allocator.attention_utils import sdpa_scaled_dot_product_attention as sdpa_attn
+from resadapt.allocator.attention_utils import (
+    beta_regularized_icdf,
+    sdpa_scaled_dot_product_attention as sdpa_attn,
+)
 from einops import rearrange, repeat
 from torch.distributions import Beta, Normal, TransformedDistribution
 from torch.distributions.transforms import SigmoidTransform
@@ -738,8 +741,9 @@ class DifferentiableImportanceAllocator(ModuleUtilsMixin, nn.Module):
             dist = Beta(alpha32, beta32)
 
             if self.continuous_eval_quantile != 0.5:
-                q = torch.tensor(self.continuous_eval_quantile, device=params.device, dtype=torch.float32).clamp(1e-4, 1-1e-4)
-                action_0_1 = dist.icdf(q)
+                action_0_1 = beta_regularized_icdf(
+                    alpha32, beta32, float(self.continuous_eval_quantile)
+                )
             else:
                 action_0_1 = dist.mean
         else:

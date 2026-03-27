@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 
 from resadapt.allocator.attention_utils import (
+    beta_regularized_icdf,
     flash_attn_varlen_qkv_dtype,
     sdpa_scaled_dot_product_attention as sdpa_attn,
 )
@@ -799,8 +800,9 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
             beta32 = beta.float()
             dist0 = Beta(alpha32, beta32)
             if self.continuous_eval_quantile != 0.5:
-                q = torch.tensor(self.continuous_eval_quantile, device=params.device, dtype=torch.float32).clamp(1e-4, 1.0 - 1e-4)
-                action_0_1 = dist0.icdf(q)
+                action_0_1 = beta_regularized_icdf(
+                    alpha32, beta32, float(self.continuous_eval_quantile)
+                )
             else:
                 action_0_1 = dist0.mean
         else:

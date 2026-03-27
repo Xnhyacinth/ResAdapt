@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 
 from resadapt.allocator.attention_utils import (
+    beta_regularized_icdf,
     flash_attn_varlen_qkv_dtype,
     sdpa_scaled_dot_product_attention as sdpa_attn,
 )
@@ -1086,13 +1087,10 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
             beta = beta.clamp(min=0.1, max=200.0)
             alpha32 = alpha.float()
             beta32 = beta.float()
-            dist0 = Beta(alpha32, beta32)
-            # Use icdf (quantile / median when q=0.5) instead of mean so skewed per-frame
-            # Beta distributions produce distinct deterministic scales under high concentration.
-            q = torch.tensor(self.continuous_eval_quantile, device=params.device, dtype=torch.float32).clamp(
-                1e-4, 1.0 - 1e-4
+            # Beta.icdf is NotImplemented in PyTorch; use betainc bisection (see attention_utils).
+            action_0_1 = beta_regularized_icdf(
+                alpha32, beta32, float(self.continuous_eval_quantile)
             )
-            action_0_1 = dist0.icdf(q)
         else:
             params_fp32 = params.float()
             mu32 = params_fp32[..., 0]
