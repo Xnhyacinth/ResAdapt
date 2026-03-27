@@ -675,6 +675,19 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
         self._last_concentration_loss = None
         self._last_scale_diagnostics = None
 
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        """Upcast legacy 0-d ``text_frame_cross_attn_gate`` to shape ``[1]`` (FSDP-compatible)."""
+        key = "text_frame_cross_attn_gate"
+        if key in state_dict:
+            t = state_dict[key]
+            if hasattr(t, "dim") and t.dim() == 0:
+                state_dict = dict(state_dict)
+                state_dict[key] = t.reshape(1).contiguous()
+        try:
+            return super().load_state_dict(state_dict, strict=strict, assign=assign)
+        except TypeError:
+            return super().load_state_dict(state_dict, strict=strict)
+
     def _initial_mean_ratio(self) -> float:
         mean_scale = min(max(self.init_scale_mean, self.min_scale), self.max_scale)
         target_ratio = (mean_scale - self.min_scale) / (self.max_scale - self.min_scale + 1e-6)

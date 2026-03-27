@@ -38,12 +38,15 @@ class SmolAllocatorForConditionalGeneration(PreTrainedModel):
         if hasattr(self.processor, "image_processor") and self.processor.image_processor is not None:
             self.processor.image_processor.do_image_splitting = False
         self.tokenizer = getattr(self.processor, "tokenizer", None)
+        weight_dtype = torch_dtype_for_hf_pretrained(config)
+        attn_impl = resolve_pretrained_attn_implementation(
+            getattr(config, "_attn_implementation", None),
+            weight_dtype=weight_dtype,
+        )
         self.smol_model = AutoModelForImageTextToText.from_pretrained(
             model_name,
-            torch_dtype=torch_dtype_for_hf_pretrained(config),
-            _attn_implementation=resolve_pretrained_attn_implementation(
-                getattr(config, "_attn_implementation", None),
-            ),
+            dtype=weight_dtype,
+            attn_implementation=attn_impl,
         )
         self.allocator = RegressionHeadAllocatorSmol(config)
 

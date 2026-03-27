@@ -16,10 +16,10 @@ class SmolAllocatorConfig(PretrainedConfig):
         and ``scripts/main.sh`` for details on composite tag resolution.
 
     Backbone dtype / attention:
-        ``torch_dtype`` (e.g. ``"bfloat16"`` on Ampere+) is passed to
-        ``AutoModelForImageTextToText.from_pretrained(torch_dtype=...)``.
-        ``_attn_implementation`` is resolved by ``resadapt.allocator.attention_utils``:
-        **prefer** ``flash_attention_2`` when ``flash_attn`` is installed; otherwise ``sdpa``.
+        ``dtype`` or ``torch_dtype`` (e.g. ``"bfloat16"`` on Ampere+) is passed to
+        ``AutoModelForImageTextToText.from_pretrained(dtype=...)``.
+        ``attn_implementation`` is resolved by ``resadapt.allocator.attention_utils``:
+        **prefer** ``flash_attention_2`` only when dtype is fp16/bf16; with ``"auto"`` or fp32 use ``sdpa``.
         Override with env ``ALLOCATOR_ATTN_IMPLEMENTATION`` (``flash_attention_2``, ``sdpa``, ``eager``).
     """
 
@@ -32,6 +32,7 @@ class SmolAllocatorConfig(PretrainedConfig):
         vocab_size: int = 49280,
         patch_size: int = 16,
         torch_dtype: str | None = None,
+        dtype: str | None = None,
         _attn_implementation: str | None = None,
         spatial_merge_size: int = 2,
         hidden_size: int = 768,
@@ -89,7 +90,7 @@ class SmolAllocatorConfig(PretrainedConfig):
         self.fps = fps
         self.vocab_size = vocab_size
         self.patch_size = patch_size
-        self.torch_dtype = torch_dtype
+        self.torch_dtype = torch_dtype if torch_dtype is not None else dtype
         self._attn_implementation = _attn_implementation
         self.spatial_merge_size = spatial_merge_size
         self.hidden_size = hidden_size

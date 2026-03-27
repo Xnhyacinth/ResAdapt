@@ -24,10 +24,10 @@ import torch.nn.functional as F
 
 
 def torch_dtype_for_hf_pretrained(config: Any) -> Any:
-    """Map ``SmolAllocatorConfig.torch_dtype`` (or legacy ``dtype``) to a HF ``torch_dtype`` value."""
-    td: Any = getattr(config, "torch_dtype", None)
+    """Map ``SmolAllocatorConfig.dtype`` / ``torch_dtype`` to a HF ``dtype`` value."""
+    td: Any = getattr(config, "dtype", None)
     if td is None:
-        td = getattr(config, "dtype", None)
+        td = getattr(config, "torch_dtype", None)
     if td is None or td == "auto":
         return "auto"
     if isinstance(td, str):
@@ -55,15 +55,33 @@ def _attn_impl_flash_or_sdp() -> str:
     return "flash_attention_2" if _flash_attn_available() else "sdpa"
 
 
+def _flash_attn_compatible_with_weight_dtype(weight_dtype: Any) -> bool:
+    """FlashAttention 2 kernels require activations/weights in fp16 or bf16 (not fp32)."""
+    if weight_dtype is None:
+        return True
+    if weight_dtype == "auto":
+        return False
+    if isinstance(weight_dtype, str):
+        tdl = weight_dtype.lower()
+        return tdl in ("bfloat16", "bf16", "float16", "fp16")
+    if isinstance(weight_dtype, torch.dtype):
+        return weight_dtype in (torch.float16, torch.bfloat16)
+    return False
+
+
 def resolve_pretrained_attn_implementation(
     attn: Optional[str],
     *,
     prefer_flash: bool = True,
+    weight_dtype: Any = None,
 ) -> str:
-    """Resolve HuggingFace ``_attn_implementation``: flash when possible, else sdpa.
+    """Resolve HuggingFace ``attn_implementation``: flash when possible, else sdpa.
 
     Override with env ``ALLOCATOR_ATTN_IMPLEMENTATION`` (``flash_attention_2``, ``sdpa``/``sdp``,
     or ``eager``). Saved ``attn`` is used when env is unset.
+
+    If the backbone is loaded in fp32 (including ``dtype="auto"`` often resolving to fp32),
+    ``flash_attention_2`` is **not** used — falls back to ``sdpa`` to avoid runtime errors.
     """
     env = os.getenv("ALLOCATOR_ATTN_IMPLEMENTATION", "").strip().lower().replace("-", "_")
     if env == "eager":
@@ -71,10 +89,16 @@ def resolve_pretrained_attn_implementation(
     if env in ("sdpa", "sdp"):
         return "sdpa"
     if env in ("flash_attention_2", "flash_attn"):
-        return _attn_impl_flash_or_sdp()
+        resolved = _attn_impl_flash_or_sdp()
+        if resolved == "flash_attention_2" and not _flash_attn_compatible_with_weight_dtype(weight_dtype):
+            return "sdpa"
+        return resolved
 
     if prefer_flash and _flash_attn_available():
-        return "flash_attention_2"
+        resolved = "flash_attention_2"
+        if not _flash_attn_compatible_with_weight_dtype(weight_dtype):
+            return "sdpa"
+        return resolved
 
     if attn:
         a = attn.lower().replace("-", "_")
@@ -83,9 +107,15 @@ def resolve_pretrained_attn_implementation(
         if a in ("sdpa", "sdp"):
             return "sdpa"
         if a in ("flash_attention_2", "flash_attn"):
-            return _attn_impl_flash_or_sdp()
+            resolved = _attn_impl_flash_or_sdp()
+            if resolved == "flash_attention_2" and not _flash_attn_compatible_with_weight_dtype(weight_dtype):
+                return "sdpa"
+            return resolved
 
-    return _attn_impl_flash_or_sdp()
+    resolved = _attn_impl_flash_or_sdp()
+    if resolved == "flash_attention_2" and not _flash_attn_compatible_with_weight_dtype(weight_dtype):
+        return "sdpa"
+    return resolved
 
 
 def forward_hf_text_model_safe(
