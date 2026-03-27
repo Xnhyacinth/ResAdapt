@@ -91,6 +91,7 @@ from verl.workers.config.optimizer import build_optimizer
 from verl.workers.rollout import get_rollout_class
 from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
 from resadapt.utils.frame_metric_utils import encode_frame_metrics
+from resadapt.utils.use_cost_frame_metrics import use_cost_implies_compute_frame_metrics
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -547,7 +548,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         self.use_orig_params = fsdp_config.get("use_orig_params", False)
         
-        # Check if actor should be frozen based on scale_multi_modal_data config
+        # Tag string for actor_frozen / ispred / aw (subset of main.sh SCALE_MULTI_MODAL_DATA).
+        # On this worker, ``self.config`` is the actor_rollout_ref (or merged role) subtree, so this matches
+        # ``actor_rollout_ref.scale_multi_modal_data`` from Hydra—not the top-level trainer config.
         scale_multi_modal_data = self.config.get("scale_multi_modal_data", None)
         freeze_actor = scale_multi_modal_data and "actor_frozen" in scale_multi_modal_data
         
@@ -2505,27 +2508,23 @@ class AllocatorWorker(Worker, DistProfilerExtension):
                 is_pred = False
                 compute_frame_metrics = False
                 scale_multi_modal_data = str(self.config.get("scale_multi_modal_data", "")).lower()
-                use_cost_value = str(self.config.get("use_cost", "")).lower()
-                needs_frame_metrics = any(
-                    token in use_cost_value
-                    for token in (
-                        "saliency_share_v1",
-                        "framepair_v1",
-                        "newtie",
-                        "capo",
-                        "frame_rank",
-                        "frame_ideal",
-                        "frameaware",
-                        "frame_new",
-                    )
-                )
+                
+                # `use_cost` is passed from ray_trainer.py via data.meta_info to ensure it reflects 
+                # any dynamic switches applied during advantage computation. Fallback to self.config.
+                use_cost_value = str(data.meta_info.get("use_cost", self.config.get("use_cost", ""))).lower()
+                
+                # Determine if we need to compute frame metrics based on the cost function configuration.
+                # This aligns with the requirements in advantage computation.
+                needs_frame_metrics = use_cost_implies_compute_frame_metrics(use_cost_value)
+                
+                # If the scale configuration explicitly requests log-prob predictions ('ispred'), enable it.
                 if scale_multi_modal_data and "ispred" in scale_multi_modal_data:
                     is_pred = True
                     data.meta_info["is_pred"] = is_pred
-                    # print("using the is pred!!")
                 
+                # Enable frame metrics computation if required by either the scale configuration ('aw') 
+                # or the cost function configuration.
                 if (scale_multi_modal_data and "aw" in scale_multi_modal_data) or needs_frame_metrics:
-                    # print("using the frame-aware!!")
                     compute_frame_metrics = True
                     data.meta_info["compute_frame_metrics"] = True
 
@@ -2605,20 +2604,12 @@ class AllocatorWorker(Worker, DistProfilerExtension):
         data.meta_info["video2image"] = self.config.get("video2image", False)
         data.meta_info["return_mm_data"] = self.config.get("return_mm_data", True)
         scale_multi_modal_data = str(self.config.get("scale_multi_modal_data", "")).lower()
-        use_cost_value = str(self.config.get("use_cost", "")).lower()
-        needs_frame_metrics = any(
-            token in use_cost_value
-            for token in (
-                "saliency_share_v1",
-                "framepair_v1",
-                "newtie",
-                "capo",
-                "frame_rank",
-                "frame_ideal",
-                "frameaware",
-                "frame_new",
-            )
-        )
+        
+        # Extract use_cost dynamically passed from ray_trainer.py to align with the current algorithm state.
+        use_cost_value = str(data.meta_info.get("use_cost", self.config.get("use_cost", ""))).lower()
+        needs_frame_metrics = use_cost_implies_compute_frame_metrics(use_cost_value)
+        
+        # Set compute_frame_metrics flag for downstream logic if needed by scale data or cost function.
         if (scale_multi_modal_data and "aw" in scale_multi_modal_data) or needs_frame_metrics:
             data.meta_info["compute_frame_metrics"] = True
 

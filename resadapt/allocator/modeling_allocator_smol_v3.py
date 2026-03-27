@@ -1,7 +1,6 @@
 import os
 import time
 import torch
-import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 from transformers import AutoProcessor, AutoModelForImageTextToText, PreTrainedModel
 from concurrent.futures import ThreadPoolExecutor
@@ -111,11 +110,6 @@ class SmolAllocatorForConditionalGeneration(PreTrainedModel):
             return None
         h, w = pixel_values[sample_index].shape[-2:]
         return h, w
-
-    def _get_image_features00(self, pixel_values, pixel_attention_mask):
-        if hasattr(self.smol_model, "get_image_features"):
-            return self.smol_model.get_image_features(pixel_values, pixel_attention_mask)
-        return self._encode_vision(pixel_values)
 
     def _get_image_features(self, pixel_values, pixel_attention_mask=None):
         if hasattr(self.smol_model, "get_image_features"):
@@ -249,23 +243,6 @@ class SmolAllocatorForConditionalGeneration(PreTrainedModel):
 
     def _process_single_message(self, msg):
         normalized = self._normalize_message(msg)
-        # total_frames = None
-        # if "content" in normalized and isinstance(normalized["content"], list):
-        #     for item in normalized["content"]:
-        #         if not isinstance(item, dict):
-        #             continue
-        #         if item.get("type") != "video":
-        #             continue
-        #         video_path = item.get("video") or item.get("path")
-        #         frames = self._get_video_total_frames(video_path)
-        #         if frames is None:
-        #             continue
-        #         item_max = item.get("max_frames", None)
-        #         if item_max is not None:
-        #             frames = min(frames, int(item_max))
-        #         total_frames = int(frames) if total_frames is None else min(total_frames, int(frames))
-        # max_frames = self.config.max_frames if total_frames is None else min(self.config.max_frames, total_frames)
-        # try:
         inputs = self.processor.apply_chat_template(
             [normalized],
             num_frames=self.config.max_frames,
@@ -274,16 +251,6 @@ class SmolAllocatorForConditionalGeneration(PreTrainedModel):
             return_dict=True,
             return_tensors="pt",
         )
-        # except Exception:
-        #     retry_frames = max(1, int(max_frames) // 2)
-        #     inputs = self.processor.apply_chat_template(
-        #         [normalized],
-        #         num_frames=retry_frames,
-        #         add_generation_prompt=True,
-        #         tokenize=True,
-        #         return_dict=True,
-        #         return_tensors="pt",
-        #     )
         return {
             "normalized": normalized,
             "plain_text": self._extract_plain_text(normalized),
@@ -433,8 +400,7 @@ class SmolAllocatorForConditionalGeneration(PreTrainedModel):
                 print(f"[allocator_timing] get_image_features_s={( _t1 - _t0 ):.4f}", flush=True)
             else:
                 image_hidden_states = self._get_image_features(pixel_values, pixel_attention_mask)
-            printed_sim = False
-            
+
             if image_hidden_states is None:
                 flat = pixel_values.view(-1, *pixel_values.shape[2:])
                 if self._timing_enabled():
@@ -464,12 +430,6 @@ class SmolAllocatorForConditionalGeneration(PreTrainedModel):
                     sample_states = image_hidden_states[offset : offset + count]
                     is_video = messages is not None and self._sample_has_video(messages[i])
                     if is_video:
-                        # if not printed_sim and count > 1:
-                        #     frame_feats = sample_states.mean(dim=1)
-                        #     norm = F.normalize(frame_feats.float(), dim=-1)
-                        #     sim = (norm[1:] * norm[:-1]).sum(dim=-1).mean().item()
-                        #     print(f"[init_frame_sim] mean={sim:.6f}")
-                        #     printed_sim = True
                         combined = sample_states.reshape(-1, sample_states.shape[-1])
                         visual_features.append(combined)
                         visual_grids.append(
@@ -528,8 +488,6 @@ class SmolAllocatorForConditionalGeneration(PreTrainedModel):
                 scale_mask=scale_mask,
                 compute_frame_metrics=compute_frame_metrics_param,
             )
-        # print(f"[allocator] scales={scales}")
-        # breakpoint()
 
         if self._timing_enabled():
             _t_total1 = time.perf_counter()
@@ -595,6 +553,8 @@ def count_params(model):
     return total, trainable
 
 if __name__ == "__main__":
+    # Framewise v3 defaults: per-frame Beta concentration, frame Transformer refine, text↔frame
+    # cross-attn, patch_ln pooling gate, redundancy-aware sim_scale loss, Beta eval via icdf(q).
     config = SmolAllocatorConfig(
         smol_model_name="HuggingFaceTB/SmolVLM2-256M-Video-Instruct",
         vocab_size=49280,
@@ -606,7 +566,6 @@ if __name__ == "__main__":
         out_hidden_size=576,
         output_dim=1024,
         self_depth=2,
-        cross_depth=1,
         dim_head=64,
         num_heads=16,
         max_frames=8,
@@ -614,51 +573,33 @@ if __name__ == "__main__":
         max_scale=2.0,
         use_discrete_action=False,
         use_text=True,
-        use_text_encoder=False,
-        # text_encoder_depth=4,
-        # text_encoder_ff_mult=4,
-        # text_encoder_heads=8,
-        # text_encoder_dropout=0.0,
-        mlp_mode="mlp",
-        vlp_mode="mlp",
+        allocator_arch="framewise_v3",
         regression_head_mode="mlp",
         use_differentiable_importance=False,
-        frame_temporal_depth=2,
-        use_text_conditioned_spatial=False,
-        enable_rope_cache=True,
         dropout=0.0,
         ff_mult=4,
-        beta_add_one=False,
+        beta_add_one=True,
         beta_param_scale=0.5,
         beta_init_mode="uniform",
-        use_cross_attn_gate=True,
-        use_dirichlet_budget=False,
-        dirichlet_budget=1.0,
-        dirichlet_eps=1e-6,
         gate_temperature=1.0,
         gate_query_scale=1.0,
         continuous_dist="beta",
         continuous_eval_quantile=0.5,
         logistic_normal_init_sigma=0.7,
-        pool_gate_mode="no_ln",
-        info_fuse_mode="pooled_ln",
-        use_frame_info=False,
-        use_learned_pooling=True,
-        frame_info_ema_alpha=0.9,
-        init_head=True,
+        categorical_temperature=1.0,
+        pool_gate_mode="patch_ln",
         init_scale_mean=1.0,
-        init_concentration=6.0,
-        init_weight_std=1e-3,
-        force_uniform_ab=False,
-        sim_scale_weight=0.0,
-        sim_tau=0.6,
-        sim_temp=0.15,
+        init_concentration=5.0,
+        per_frame_concentration=True,
+        frame_refine_depth=2,
+        use_text_frame_cross_attn=True,
+        sim_scale_weight=0.15,
+        sim_tau=0.55,
+        sim_temp=0.12,
         sim_gamma=0.05,
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = SmolAllocatorForConditionalGeneration(config).to(device)
-    logistic_normal_config = SmolAllocatorConfig(**{**config.to_dict(), "continuous_dist": "logistic_normal"})
-    logistic_normal_model = SmolAllocatorForConditionalGeneration(logistic_normal_config).to(device)
     # "/mnt/bn/jiangzhongtao/users/liaohuanxuan/models/allocatorv2_sft",
     # model = SmolAllocatorForConditionalGeneration.from_pretrained(
     #     "/mnt/bn/jiangzhongtao/users/liaohuanxuan/models/allocator_smol_init",
@@ -674,13 +615,13 @@ if __name__ == "__main__":
     print(f"Trainable params: {trainable/1e9:.3f} B")
     
     from PIL import Image
-    image = Image.open("/mnt/bn/jiangzhongtao/users/liaohuanxuan/VisionThink/scissor.png")
-    image1 = Image.open("/mnt/bn/jiangzhongtao/users/liaohuanxuan/vlm_datasets/LLaVA-Pretrain/images/00000/000000010.jpg")
-    
+    image = Image.open("YOUR_WORKSPACE_PATH/VisionThink/scissor.png")
+    image1 = Image.open("YOUR_WORKSPACE_PATH/vlm_datasets/LLaVA-Pretrain/images/00000/000000010.jpg")
+
     messages = [
         [{"role": "user", "content": [{"type": "image", "image": image}, {"type": "image", "image": image1}, {"type": "text", "text": "Describe this image."}]}],
         [{"role": "user", "content": [{"type": "image", "image": image1}, {"type": "text", "text": "Describe this image."}]}],
-        [{"role": "user", "content": [{"type": "video", "video": "/mnt/bn/jiangzhongtao/users/liaohuanxuan/vlm_datasets/LLaVA-Video-178K/gpt4o_caption_prompt/83FR0RjX7qA.mp4", "max_frames": 8}, {"type": "text", "text": "Describe this video."}]}],
+        [{"role": "user", "content": [{"type": "video", "video": "YOUR_WORKSPACE_PATH/vlm_datasets/LLaVA-Video-178K/gpt4o_caption_prompt/83FR0RjX7qA.mp4", "max_frames": 8}, {"type": "text", "text": "Describe this video."}]}],
     ]
 
     messages_text = [
@@ -716,4 +657,4 @@ if __name__ == "__main__":
     out_text = model.scale_multi_modal(messages=messages_text, return_mm_data=False, eval_mode=True)
     print({k: (v.shape if torch.is_tensor(v) else v) for k, v in out.items()})
     print({k: (v.shape if torch.is_tensor(v) else v) for k, v in out_text.items()})
-    breakpoint()
+    print("demo ok")

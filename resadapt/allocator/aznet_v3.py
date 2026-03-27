@@ -33,15 +33,6 @@ def FeedForward(dim, mult=4, dropout=0.):
 
 
 class RotaryEmbedding(nn.Module):
-    # def __init__(self, dim):
-    #     super().__init__()
-    #     inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim))
-    #     self.register_buffer("inv_freq", inv_freq)
-
-    # def forward(self, max_seq_len, *, device, dtype=torch.float32):
-    #     seq = torch.arange(max_seq_len, device=device, dtype=dtype)
-    #     freqs = einsum("i, j -> i j", seq, self.inv_freq.to(dtype))
-    #     return torch.cat((freqs, freqs), dim=-1)
     inv_freq: torch.Tensor  # fix linting for `register_buffer`
 
     def __init__(self, dim: int, theta: float = 10000.0) -> None:
@@ -516,6 +507,19 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
     Unified Allocator supporting both Discrete (Categorical) and Continuous (Beta) actions.
     Predicts per-frame scale factors from patch-level vision features with optional text conditioning.
     Returns: (actions in [0,1], scale_factors in [min_scale,max_scale], log_prob).
+
+    Design notes:
+    - **Global budget + zero-sum allocation** keeps total scale roughly stable while allowing
+      relative emphasis across frames.
+    - **per_frame_concentration** (default on): Beta concentration / σ is predicted per frame so
+      eval scales do not collapse when clip-level variance is shared.
+    - **frame_refine_depth**: TransformerEncoder over frames after the temporal mixer for
+      inter-frame redundancy / saliency (default 2).
+    - **text_frame_cross_attn**: optional MultiheadAttention (frames query, text KV) after refine
+      so per-frame scales track question relevance beyond the patch gate alone.
+
+    Config compatibility: ``info_fuse_mode`` (e.g. from SmolAllocatorConfig) is accepted and ignored;
+    fusion uses ``signal_proj`` / ``_build_signal_features`` instead of the legacy info_proj path.
     """
     def __init__(
         self, *, dim, depth, dim_head=64, heads=8, dropout=0., ff_mult=4,
@@ -525,10 +529,17 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
         beta_param_scale=1.0, beta_add_one=True, beta_init_mode="uniform",
         continuous_dist="beta", continuous_eval_quantile=0.5, logistic_normal_init_sigma=0.7,
         categorical_temperature=1.0,
-        pool_gate_mode="no_ln", info_fuse_mode="pooled_ln",
-        sim_scale_weight=0.0, sim_tau=0.0, sim_temp=1.0, sim_gamma=0.0,
+        pool_gate_mode="no_ln",
+        sim_scale_weight=0.1, sim_tau=0.0, sim_temp=1.0, sim_gamma=0.0,
         init_scale_mean=1.0, init_concentration=4.0,
+        per_frame_concentration: bool = True,
+        frame_refine_depth: int = 2,
+        use_text_frame_cross_attn: bool = True,
+        **kwargs,
     ):
+        kwargs.pop("info_fuse_mode", None)
+        if kwargs:
+            raise TypeError(f"FrameWiseScaleAllocator got unexpected keyword arguments: {sorted(kwargs)}")
         super().__init__()
         self.spatial_merge_size = spatial_merge_size
         self.max_frames = max_frames
@@ -548,13 +559,15 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
         self.logistic_normal_init_sigma = float(logistic_normal_init_sigma)
         self.categorical_temperature = float(categorical_temperature)
         self.pool_gate_mode = str(pool_gate_mode)
-        self.info_fuse_mode = str(info_fuse_mode)
         self.sim_scale_weight = float(sim_scale_weight)
         self.sim_tau = float(sim_tau)
         self.sim_temp = float(sim_temp)
         self.sim_gamma = float(sim_gamma)
         self.init_scale_mean = float(init_scale_mean)
         self.init_concentration = float(init_concentration)
+        self.per_frame_concentration = bool(per_frame_concentration)
+        self.frame_refine_depth = int(frame_refine_depth)
+        self.use_text_frame_cross_attn = bool(use_text_frame_cross_attn)
 
         if self.continuous_dist not in {"beta", "logistic_normal", "categorical"}:
             raise ValueError(f"Unsupported continuous_dist: {self.continuous_dist}")
@@ -586,24 +599,8 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
                 nn.Linear(dim // 2, 1, bias=False),
             )
         
-        # Text-Frame Relevance Scorer (NEW)
         self.relevance_scorer = TextFrameRelevanceScorer(dim=dim, use_projection=True)
-        
-        # info_dim: variance, entropy, peak, sim_prev, relevance (NEW: 4 -> 5)
-        self.info_dim = 5
-        if self.info_fuse_mode == "residual_gate":
-            self.info_proj = nn.Linear(dim + self.info_dim, dim)
-            self.info_gate = nn.Parameter(torch.zeros(1))
-            self.pooled_norm = None
-        elif self.info_fuse_mode == "pooled_ln":
-            self.pooled_norm = nn.LayerNorm(dim)
-            self.info_proj = nn.Linear(dim + self.info_dim, dim, bias=True)
-        else:
-            self.pooled_norm = None
-            self.info_proj = nn.Sequential(
-                nn.LayerNorm(dim + self.info_dim),
-                nn.Linear(dim + self.info_dim, dim),
-            )
+
         if regression_head_mode == "linear":
             self.regression_head = nn.Linear(dim, output_dim)
         elif regression_head_mode == "ln_linear":
@@ -623,6 +620,38 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
             dropout=dropout,
             ff_mult=ff_mult,
         )
+        refine_heads = max(1, min(int(heads), 8))
+        while refine_heads > 1 and dim % refine_heads != 0:
+            refine_heads -= 1
+        if self.frame_refine_depth > 0:
+            enc_layer = nn.TransformerEncoderLayer(
+                d_model=dim,
+                nhead=refine_heads,
+                dim_feedforward=int(dim * ff_mult),
+                dropout=dropout,
+                activation="gelu",
+                batch_first=True,
+                norm_first=True,
+            )
+            self.frame_refine = nn.TransformerEncoder(enc_layer, num_layers=int(self.frame_refine_depth))
+        else:
+            self.frame_refine = None
+
+        cross_heads = max(1, min(int(heads), 8))
+        while cross_heads > 1 and dim % cross_heads != 0:
+            cross_heads -= 1
+        if self.use_text_frame_cross_attn:
+            self.text_frame_cross_attn = nn.MultiheadAttention(
+                embed_dim=dim,
+                num_heads=cross_heads,
+                dropout=dropout,
+                batch_first=True,
+            )
+            self.text_frame_cross_attn_gate = nn.Parameter(torch.tensor(0.25))
+        else:
+            self.text_frame_cross_attn = None
+            self.text_frame_cross_attn_gate = None
+
         self.signal_proj = nn.Sequential(
             nn.LayerNorm(3),
             nn.Linear(3, dim),
@@ -645,7 +674,6 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
         self._last_scale_var = None
         self._last_concentration_loss = None
         self._last_scale_diagnostics = None
-        
 
     def _initial_mean_ratio(self) -> float:
         mean_scale = min(max(self.init_scale_mean, self.min_scale), self.max_scale)
@@ -837,6 +865,13 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
         )
         return self.temporal_mixer(frame_tokens + pos.unsqueeze(0), mask=valid_mask)
 
+    def _refine_frame_states(self, frame_tokens: torch.Tensor, valid_mask: torch.Tensor) -> torch.Tensor:
+        """Optional second pass: full-sequence self-attention over frames (inter-frame context)."""
+        if self.frame_refine is None:
+            return frame_tokens
+        key_padding_mask = ~valid_mask.to(torch.bool)
+        return self.frame_refine(frame_tokens, src_key_padding_mask=key_padding_mask)
+
     def _compute_redundancy(self, frame_states: torch.Tensor, valid_mask: torch.Tensor) -> torch.Tensor:
         normed = F.normalize(frame_states.float(), dim=-1)
         sim_matrix = torch.matmul(normed, normed.transpose(-1, -2))
@@ -894,11 +929,17 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
         mean_logit = budget_logit + allocation.unsqueeze(-1)
 
         if self.continuous_dist == "logistic_normal":
-            sigma_raw = self.variance_head(clip_state).unsqueeze(1).expand(-1, frame_states.shape[1], -1)
+            if self.per_frame_concentration:
+                sigma_raw = self.variance_head(policy_states)
+            else:
+                sigma_raw = self.variance_head(clip_state).unsqueeze(1).expand(-1, frame_states.shape[1], -1)
             return torch.cat([mean_logit, sigma_raw], dim=-1)
 
         base_concentration = 4.0 if self.beta_add_one else 2.0
-        concentration = F.softplus(self.variance_head(clip_state)) + base_concentration
+        if self.per_frame_concentration:
+            concentration = F.softplus(self.variance_head(policy_states).squeeze(-1)) + base_concentration
+        else:
+            concentration = F.softplus(self.variance_head(clip_state)) + base_concentration
         mean01 = torch.sigmoid(mean_logit.squeeze(-1)).clamp(1e-4, 1.0 - 1e-4)
         concentration = self._ensure_feasible_beta_concentration(mean01, concentration)
         alpha_target = (mean01 * concentration).clamp_min(1e-4)
@@ -1050,11 +1091,12 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
             alpha32 = alpha.float()
             beta32 = beta.float()
             dist0 = Beta(alpha32, beta32)
-            if self.continuous_eval_quantile != 0.5:
-                q = torch.tensor(self.continuous_eval_quantile, device=params.device, dtype=torch.float32).clamp(1e-4, 1.0 - 1e-4)
-                action_0_1 = dist0.icdf(q)
-            else:
-                action_0_1 = dist0.mean
+            # Use icdf (quantile / median when q=0.5) instead of mean so skewed per-frame
+            # Beta distributions produce distinct deterministic scales under high concentration.
+            q = torch.tensor(self.continuous_eval_quantile, device=params.device, dtype=torch.float32).clamp(
+                1e-4, 1.0 - 1e-4
+            )
+            action_0_1 = dist0.icdf(q)
             # print(f"Beta dist deterministic: {action_0_1}")
             # print("alpha:", alpha)
             # print("beta:", beta)
@@ -1146,6 +1188,19 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
 
             pooled, detail_score, gate_entropy = self._pool_frame_tokens(patch_states, text_states_i, text_mask_i)
             frame_states = self._mix_frame_tokens(pooled, valid_mask_i)
+            frame_states = self._refine_frame_states(frame_states, valid_mask_i)
+            if self.text_frame_cross_attn is not None and text_states_i is not None:
+                ts = text_states_i.to(frame_states.dtype)
+                kpm = ~text_mask_i.to(torch.bool) if text_mask_i is not None else None
+                attn_out, _ = self.text_frame_cross_attn(
+                    frame_states,
+                    ts,
+                    ts,
+                    key_padding_mask=kpm,
+                    need_weights=False,
+                )
+                g = torch.sigmoid(self.text_frame_cross_attn_gate)
+                frame_states = frame_states + g * attn_out
             signal_features, signal_metrics = self._build_signal_features(
                 frame_states,
                 valid_mask_i,
@@ -1447,11 +1502,6 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
         
         return output
 
-    def _debug_nan(self):
-        for name, param in self.named_parameters():
-            if torch.isnan(param).any():
-                print(f"NaN in param: {name}")
-
     def get_frame_metrics(self) -> dict:
         """Get last computed frame metrics dict for advantage computation.
         
@@ -1544,7 +1594,7 @@ class RegressionHeadAllocator(ModuleUtilsMixin, nn.Module):
             from resadapt.allocator.saliency_share_allocator_v3 import SaliencyShareScaleAllocator
 
             scorer_cls = SaliencyShareScaleAllocator
-        elif allocator_arch not in {"framewise_v3", "framewise_active_v1", "framewise"}:
+        elif allocator_arch not in {"framewise_v3", "framewise_v4", "framewise_active_v1", "framewise"}:
             raise ValueError(f"Unsupported allocator_arch: {allocator_arch}")
 
         self.scorer = scorer_cls(
@@ -1552,6 +1602,8 @@ class RegressionHeadAllocator(ModuleUtilsMixin, nn.Module):
             depth=vision_config.self_depth,
             dim_head=vision_config.dim_head,
             heads=vision_config.num_heads,
+            dropout=float(getattr(vision_config, "dropout", 0.0)),
+            ff_mult=int(getattr(vision_config, "ff_mult", 4)),
             max_frames=vision_config.max_frames if hasattr(vision_config, "max_frames") else 4,
             spatial_merge_size=vision_config.spatial_merge_size,
             use_discrete_action=vision_config.use_discrete_action,
@@ -1561,20 +1613,23 @@ class RegressionHeadAllocator(ModuleUtilsMixin, nn.Module):
             gate_temperature=getattr(vision_config, "gate_temperature", 1.0),
             gate_query_scale=getattr(vision_config, "gate_query_scale", 1.0),
             regression_head_mode=getattr(vision_config, "regression_head_mode", "mlp"),
-            beta_param_scale=getattr(vision_config, "beta_param_scale", 1.0),
+            beta_param_scale=getattr(vision_config, "beta_param_scale", 0.5),
             beta_add_one=getattr(vision_config, "beta_add_one", True),
             beta_init_mode=getattr(vision_config, "beta_init_mode", "uniform"),
             continuous_dist=getattr(vision_config, "continuous_dist", "beta"),
             continuous_eval_quantile=getattr(vision_config, "continuous_eval_quantile", 0.5),
             logistic_normal_init_sigma=getattr(vision_config, "logistic_normal_init_sigma", 0.7),
-            pool_gate_mode=getattr(vision_config, "pool_gate_mode", "no_ln"),
-            info_fuse_mode=getattr(vision_config, "info_fuse_mode", "pooled_ln"),
-            sim_scale_weight=getattr(vision_config, "sim_scale_weight", 0.0),
-            sim_tau=getattr(vision_config, "sim_tau", 0.0),
-            sim_temp=getattr(vision_config, "sim_temp", 1.0),
-            sim_gamma=getattr(vision_config, "sim_gamma", 0.0),
+            categorical_temperature=getattr(vision_config, "categorical_temperature", 1.0),
+            pool_gate_mode=getattr(vision_config, "pool_gate_mode", "patch_ln"),
+            sim_scale_weight=getattr(vision_config, "sim_scale_weight", 0.15),
+            sim_tau=getattr(vision_config, "sim_tau", 0.5),
+            sim_temp=getattr(vision_config, "sim_temp", 0.1),
+            sim_gamma=getattr(vision_config, "sim_gamma", 0.05),
             init_scale_mean=getattr(vision_config, "init_scale_mean", 1.0),
-            init_concentration=getattr(vision_config, "init_concentration", 4.0),
+            init_concentration=getattr(vision_config, "init_concentration", 5.0),
+            per_frame_concentration=bool(getattr(vision_config, "per_frame_concentration", True)),
+            frame_refine_depth=int(getattr(vision_config, "frame_refine_depth", 2)),
+            use_text_frame_cross_attn=bool(getattr(vision_config, "use_text_frame_cross_attn", True)),
         )
         self.out_hidden_size = out_hidden_size
         self.output_dim = output_dim
@@ -1823,6 +1878,8 @@ class RegressionHeadAllocatorV2(ModuleUtilsMixin, nn.Module):
             depth=vision_config.self_depth,
             dim_head=vision_config.dim_head,
             heads=vision_config.num_heads,
+            dropout=float(getattr(vision_config, "dropout", 0.0)),
+            ff_mult=int(getattr(vision_config, "ff_mult", 4)),
             cross_attn_depth=vision_config.cross_depth,
             max_frames=vision_config.max_frames if hasattr(vision_config, "max_frames") else 4,
             spatial_merge_size=vision_config.spatial_merge_size,
@@ -1830,17 +1887,18 @@ class RegressionHeadAllocatorV2(ModuleUtilsMixin, nn.Module):
             scale_bins=vision_config.scale_bins if hasattr(vision_config, "scale_bins") else None,
             min_scale=vision_config.min_scale,
             max_scale=vision_config.max_scale,
-            # New V2 params
             gate_mode=getattr(vision_config, "gate_mode", "gumbel_softmax"),
             gate_k_ratio=getattr(vision_config, "gate_k_ratio", 0.25),
             contrastive_weight=getattr(vision_config, "contrastive_weight", 0.1),
             contrastive_temperature=getattr(vision_config, "contrastive_temperature", 0.1),
-            # Sim scale params (pass through)
+            contrastive_margin=getattr(vision_config, "contrastive_margin", 0.0),
             sim_scale_weight=getattr(vision_config, "sim_scale_weight", 0.0),
             sim_tau=getattr(vision_config, "sim_tau", 0.5),
             sim_temp=getattr(vision_config, "sim_temp", 0.1),
             sim_gamma=getattr(vision_config, "sim_gamma", 0.05),
-            # Shared params
+            temporal_mixer_depth=getattr(vision_config, "temporal_mixer_depth", 1),
+            temporal_use_pos=getattr(vision_config, "temporal_use_pos", True),
+            dual_path_depth=getattr(vision_config, "dual_path_depth", 1),
             continuous_dist=getattr(vision_config, "continuous_dist", "beta"),
             continuous_eval_quantile=getattr(vision_config, "continuous_eval_quantile", 0.5),
             beta_param_scale=getattr(vision_config, "beta_param_scale", 1.0),
@@ -1963,59 +2021,34 @@ class RegressionHeadAllocatorV2(ModuleUtilsMixin, nn.Module):
         return getattr(self.scorer, 'last_frame_features', None)
 
 
-# --- Main Execution ---
-if __name__ == '__main__':
+# --- Smoke test (run: python -m resadapt.allocator.aznet_v3) ---
+if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    
-    MAX_FRAMES = 32
-    PATCHES_PER_FRAME = 256
-    MAX_TEXT_LEN = 1024
-    
+    B, T, L, N, D = 2, 4, 64, 32, 512
+    spatial_merge = 2
+    # visual_grid_thw[:,1]*[:,2] // spatial_merge**2 must equal L per frame (here 16*16//4 = 64)
     model = FrameWiseScaleAllocator(
-        dim=512,
+        dim=D,
         depth=2,
         dim_head=64,
         heads=8,
-        cross_attn_depth=2,
-        temporal_depth=2,
-        max_frames=MAX_FRAMES,
-        patches_per_frame=PATCHES_PER_FRAME,
-        max_text_len=MAX_TEXT_LEN,
+        max_frames=T,
+        spatial_merge_size=spatial_merge,
     ).to(device)
-
-    B, T, L, N, D = 2, MAX_FRAMES, PATCHES_PER_FRAME, 128, 512
-    
-    visual_features = torch.randn(B, T, L, D).to(device)
-    text_features = torch.randn(B, N, D).to(device)
-
-    video_mask = torch.ones(B, T, L, dtype=torch.bool).to(device)
-    text_mask = torch.ones(B, N, dtype=torch.bool).to(device)
-
-    scale_factors, log_prob = model(
-        visual_patch_features=visual_features,
+    visual_features_batch = torch.randn(B, T * L, D, device=device)
+    visual_grid_thw = torch.tensor([[T, 16, 16], [T, 16, 16]], device=device, dtype=torch.long)
+    text_features = torch.randn(B, N, D, device=device)
+    text_mask = torch.ones(B, N, dtype=torch.bool, device=device)
+    raw_actions, scales, log_probs, scale_mask = model(
+        visual_features_batch=visual_features_batch,
+        visual_grid_thw=visual_grid_thw,
         text_features=text_features,
-        video_mask=video_mask,
-        text_mask=text_mask
+        text_mask=text_mask,
+        eval_mode=False,
+        visual_per_sample=[1] * B,
     )
-
-    print("Output scale_factors shape:", scale_factors.shape)
-    assert scale_factors.shape == (B, T)
-    
-    is_in_range = (scale_factors >= model.min_scale).all() and (scale_factors <= model.max_scale).all()
-    print(f"Are scale factors in range? {is_in_range}")
-    assert is_in_range
-    
-    print("\nExample scale factors for the first sample in batch:")
-    print(scale_factors[0].detach().cpu().numpy())
-    
-    print("\nFrameWiseScaleAllocator ran successfully!")
-
-    rewards = torch.randn(scale_factors.shape[0], device=device) # Dummy rewards, shape (B,)
-
-    # 4. Compute policy loss
-    policy_loss = -(log_prob * rewards).mean()
-    
-    print("--- Beta Distribution Output ---")
-    print("Sampled scale_factors shape:", scale_factors.shape)
-    print("Log probabilities shape:", log_prob.shape)
-    print("Policy Loss (example):", policy_loss.item())
+    assert scales is not None and scales.shape[0] == B
+    assert scale_mask is not None
+    vm = scales[scale_mask]
+    assert (vm >= model.min_scale).all() and (vm <= model.max_scale).all()
+    print("FrameWiseScaleAllocator smoke test OK:", scales.shape, "log_probs:", None if log_probs is None else log_probs.shape)

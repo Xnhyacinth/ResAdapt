@@ -30,6 +30,7 @@ class RegressionHeadAllocatorSmol(ModuleUtilsMixin, nn.Module):
 
         use_differentiable = bool(getattr(vision_config, "use_differentiable_importance", False))
         scorer_cls = DifferentiableImportanceAllocator if use_differentiable else FrameWiseScaleAllocator
+        # Keys must match FrameWiseScaleAllocator (aznet_v1) or DifferentiableImportanceAllocator __init__.
         scorer_kwargs = dict(
             dim=output_dim,
             depth=getattr(vision_config, "self_depth", 2),
@@ -46,22 +47,6 @@ class RegressionHeadAllocatorSmol(ModuleUtilsMixin, nn.Module):
             ff_mult=getattr(vision_config, "ff_mult", 4),
             beta_add_one=getattr(vision_config, "beta_add_one", True),
             beta_init_mode=getattr(vision_config, "beta_init_mode", "uniform"),
-            frame_temporal_depth=getattr(vision_config, "frame_temporal_depth", 2),
-            use_text_conditioned_spatial=getattr(vision_config, "use_text_conditioned_spatial", False),
-            enable_rope_cache=getattr(vision_config, "enable_rope_cache", True),
-            use_dirichlet_budget=getattr(vision_config, "use_dirichlet_budget", False),
-            dirichlet_budget=getattr(vision_config, "dirichlet_budget", 1.0),
-            dirichlet_eps=getattr(vision_config, "dirichlet_eps", 1e-6),
-            use_frame_info=getattr(vision_config, "use_frame_info", False),
-            use_learned_pooling=getattr(vision_config, "use_learned_pooling", False),
-            frame_info_ema_alpha=getattr(vision_config, "frame_info_ema_alpha", 0.9),
-            init_head=getattr(vision_config, "init_head", True),
-            init_scale_mean=getattr(vision_config, "init_scale_mean", 1.0),
-            init_concentration=getattr(vision_config, "init_concentration", 4.0),
-            init_weight_std=getattr(vision_config, "init_weight_std", 1e-3),
-            dirichlet_logit_noise_std=getattr(vision_config, "dirichlet_logit_noise_std", 0.0),
-            dirichlet_init_weight_std=getattr(vision_config, "dirichlet_init_weight_std", None),
-            force_uniform_ab=getattr(vision_config, "force_uniform_ab", False),
             beta_param_scale=getattr(vision_config, "beta_param_scale", 1.0),
             gate_temperature=getattr(vision_config, "gate_temperature", 1.0),
             gate_query_scale=getattr(vision_config, "gate_query_scale", 1.0),
@@ -80,21 +65,12 @@ class RegressionHeadAllocatorSmol(ModuleUtilsMixin, nn.Module):
             scorer_kwargs.update(
                 gate_mode=getattr(vision_config, "gate_mode", "gumbel_softmax"),
                 gate_k_ratio=getattr(vision_config, "gate_k_ratio", 0.25),
-                continuous_dist=getattr(vision_config, "continuous_dist", "beta"),
-                continuous_eval_quantile=getattr(vision_config, "continuous_eval_quantile", 0.5),
-                # beta_param_scale=getattr(vision_config, "beta_param_scale", 1.0),
-                logistic_normal_init_sigma=getattr(vision_config, "logistic_normal_init_sigma", 0.7),
                 contrastive_weight=getattr(vision_config, "contrastive_weight", 0.1),
                 contrastive_temperature=getattr(vision_config, "contrastive_temperature", 0.1),
                 contrastive_margin=getattr(vision_config, "contrastive_margin", 0.0),
-                sim_scale_weight=getattr(vision_config, "sim_scale_weight", 0.1),
-                sim_tau=getattr(vision_config, "sim_tau", 0.5),
-                sim_temp=getattr(vision_config, "sim_temp", 0.1),
-                sim_gamma=getattr(vision_config, "sim_gamma", 0.05),
                 temporal_mixer_depth=getattr(vision_config, "temporal_mixer_depth", 1),
                 temporal_use_pos=getattr(vision_config, "temporal_use_pos", True),
                 dual_path_depth=getattr(vision_config, "dual_path_depth", 1),
-
             )
         valid_keys = set(inspect.signature(scorer_cls.__init__).parameters.keys())
         valid_keys.discard("self")

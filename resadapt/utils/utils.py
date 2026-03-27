@@ -43,6 +43,18 @@ def get_images_per_sample(
     merge_len: int,
     image_token_index: int
 ) -> torch.Tensor:
+    """
+    Computes the number of image objects present in each sample of a batch.
+    
+    Args:
+        input_ids (torch.Tensor): The tokenized input IDs of shape (Batch, Seq_Len).
+        image_grid_thw (torch.Tensor): Tensor representing the Temporal-Height-Width grids of images.
+        merge_len (int): The spatial merge length factor.
+        image_token_index (int): The token ID used to identify image placeholders.
+        
+    Returns:
+        list: A list containing the number of image objects for each sample.
+    """
     tokens_per_image_list = (image_grid_thw.prod(-1) // merge_len).tolist()
     tokens_per_sample_list = (input_ids == image_token_index).sum(dim=1).tolist()
     
@@ -103,6 +115,18 @@ def regroup_modal_data(
     image_counts: torch.Tensor | list, 
     video_counts: torch.Tensor | list
 ) -> list[dict]:
+    """
+    Regroups flattened multi-modal data back into per-sample lists based on the provided counts.
+    
+    Args:
+        multi_modal_data (dict): A dictionary containing flattened lists of "images" and "videos".
+        image_counts (torch.Tensor | list): The number of image objects per sample.
+        video_counts (torch.Tensor | list): The number of video objects per sample.
+        
+    Returns:
+        list[dict]: A list of dictionaries, where each dictionary contains the "image" and "video" 
+                    lists specific to that sample.
+    """
     all_images = multi_modal_data.get("images")
     if all_images is None: all_images = []
     
@@ -298,6 +322,16 @@ def _apply_hf_processor_main(
 
 
 def tensor_to_pil_list(frames):
+    """
+    Converts a tensor or numpy array of image frames into a list of PIL Images.
+    
+    Args:
+        frames (torch.Tensor or np.ndarray): The image frames, expected to be in 
+                                             shape (T, C, H, W) or (T, H, W, C).
+                                             
+    Returns:
+        list[Image.Image]: A list of PIL Image objects.
+    """
     pil_images = []
     if isinstance(frames, torch.Tensor):
         frames = frames.detach().cpu().numpy()

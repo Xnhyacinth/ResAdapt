@@ -26,15 +26,19 @@ data:
 
 algorithm:
   use_filter_sid: False
+  # null; main.sh sets capo_acc when SCALE_ENABLE_COST=1. Override: piecewise_v2_acc, gdpo, etc.
   use_cost: null
   cost_penalty_coef: 0.05
-  cost_encouragement_coef: 0.1
+  cost_encouragement_coef: 0.25
   max_scale: 2.0
   min_scale: 0.25
-  centered_term: 0.5
+  init_scale_mean: 1.0
+  centered_term: 0.4
   use_discrete_action: False
   batch_norm_adv: False
   use_hadw_in_grpo: False
+  # Run tag string: hadw, switch, actor_frozen, ispred, aw, cost*, sep, filter, …
+  # Semantics: resadapt/utils/scale_multi_modal_tags.py. main.sh sets algorithm/allocator/actor_rollout_ref together.
   scale_multi_modal_data: null
 
 allocator:
@@ -43,6 +47,7 @@ allocator:
   dedicated_8gpu: False
   n_gpus_per_node: 8
   nnodes: 1
+  # Same tag string as algorithm when using main.sh; see scale_multi_modal_tags.py
   scale_multi_modal_data: null
   scale_n: 1
   video2image: False
@@ -71,6 +76,7 @@ allocator:
     entropy_coeff: 0
 
 actor_rollout_ref:
+  # Worker subtree reads this for actor_frozen / freeze heuristics; keep in sync with algorithm.
   scale_multi_modal_data: null
   scale_n: 1
   # actor:

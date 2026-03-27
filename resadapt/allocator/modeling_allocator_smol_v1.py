@@ -596,6 +596,7 @@ def count_params(model):
     return total, trainable
 
 if __name__ == "__main__":
+    # Matches aznet_smol_v1 + aznet_v1 / importance_allocator_v2 (see SmolAllocatorConfig).
     config = SmolAllocatorConfig(
         smol_model_name="HuggingFaceTB/SmolVLM2-256M-Video-Instruct",
         vocab_size=49280,
@@ -615,27 +616,13 @@ if __name__ == "__main__":
         max_scale=2.0,
         use_discrete_action=False,
         use_text=True,
-        use_text_encoder=False,
-        # text_encoder_depth=4,
-        # text_encoder_ff_mult=4,
-        # text_encoder_heads=8,
-        # text_encoder_dropout=0.0,
-        mlp_mode="mlp",
-        vlp_mode="mlp",
         regression_head_mode="mlp",
         use_differentiable_importance=False,
-        frame_temporal_depth=2,
-        use_text_conditioned_spatial=False,
-        enable_rope_cache=True,
         dropout=0.0,
         ff_mult=4,
         beta_add_one=False,
         beta_param_scale=0.5,
         beta_init_mode="uniform",
-        use_cross_attn_gate=True,
-        use_dirichlet_budget=False,
-        dirichlet_budget=1.0,
-        dirichlet_eps=1e-6,
         gate_temperature=1.0,
         gate_query_scale=1.0,
         continuous_dist="beta",
@@ -643,14 +630,6 @@ if __name__ == "__main__":
         logistic_normal_init_sigma=0.7,
         pool_gate_mode="no_ln",
         info_fuse_mode="pooled_ln",
-        use_frame_info=False,
-        use_learned_pooling=True,
-        frame_info_ema_alpha=0.9,
-        init_head=True,
-        init_scale_mean=1.0,
-        init_concentration=6.0,
-        init_weight_std=1e-3,
-        force_uniform_ab=False,
         sim_scale_weight=0.0,
         sim_tau=0.6,
         sim_temp=0.15,
@@ -714,4 +693,4 @@ if __name__ == "__main__":
     out_text = model.scale_multi_modal(messages=messages_text, return_mm_data=False, eval_mode=True)
     print({k: (v.shape if torch.is_tensor(v) else v) for k, v in out.items()})
     print({k: (v.shape if torch.is_tensor(v) else v) for k, v in out_text.items()})
-    breakpoint()
+    print("demo ok")

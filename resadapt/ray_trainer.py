@@ -67,7 +67,67 @@ from verl.utils.torch_functional import masked_mean
 ###
 from resadapt.utils.frame_metric_utils import sync_frame_metrics
 from resadapt.utils.logprob_utils import align_allocator_log_probs_to_batch
+from resadapt.utils.scale_multi_modal_tags import resolve_scale_multi_modal_data_tag
 from resadapt.verl_patches.tracking import ValidationGenerationsLogger
+###
+
+
+def _resolve_scale_multi_modal_tag(full_cfg: Any) -> str:
+    """Resolve the scale run tag (hadw, switch, actor_frozen, ispred, aw, …).
+
+    Delegates to :func:`resolve_scale_multi_modal_data_tag`; see module doc there.
+    """
+    return resolve_scale_multi_modal_data_tag(full_cfg)
+
+
+def _algorithm_config_with_scale_tag(algo_cfg: Any, full_cfg: Any) -> Any:
+    """Return algorithm config with ``scale_multi_modal_data`` filled from allocator/rollout if missing."""
+    tag = algo_cfg.get("scale_multi_modal_data") if hasattr(algo_cfg, "get") else None
+    s = str(tag or "").strip().lower()
+    if s and s not in ("none", "null", ""):
+        return algo_cfg
+    merged = None
+    if full_cfg.get("allocator") is not None:
+        merged = full_cfg.allocator.get("scale_multi_modal_data")
+    if merged in (None, "", "null") and full_cfg.get("actor_rollout_ref") is not None:
+        merged = full_cfg.actor_rollout_ref.get("scale_multi_modal_data")
+    if merged in (None, "", "null"):
+        return algo_cfg
+    return OmegaConf.merge(algo_cfg, OmegaConf.create({"scale_multi_modal_data": merged}))
+
+
+def _per_sample_reward_extras_from_batch(data: DataProto) -> Optional[list[dict[str, Any]]]:
+    """Rebuild per-sample reward extra dicts for :func:`compute_allocator_advantage`.
+
+    Colocated scoring (``RewardLoopManager.compute_rm_score``) flattens extras into
+    ``non_tensor_batch`` using keys from ``meta_info[\"reward_extra_keys\"]``; see
+    ``verl/experimental/reward_loop/reward_loop.py``. The advantage path needs a
+    ``list`` of dict-like rows (e.g. ``acc_reward`` from ``reward_r1.compute_score``),
+    not a single ``reward_extra_info`` field (that key is not written to the batch).
+    """
+    meta = getattr(data, "meta_info", None) or {}
+    keys = meta.get("reward_extra_keys") or []
+    if not keys:
+        return None
+    n = len(data)
+    rows: list[dict[str, Any]] = []
+    for i in range(n):
+        row: dict[str, Any] = {}
+        for k in keys:
+            if k not in data.non_tensor_batch:
+                continue
+            arr = data.non_tensor_batch[k]
+            v = arr[i]
+            if isinstance(v, np.ndarray):
+                v = v.item() if v.size == 1 else v
+            if isinstance(v, (int, float, np.floating, np.integer)):
+                row[k] = float(v)
+            else:
+                row[k] = v
+        rows.append(row)
+    return rows
+
+
 ###
 from verl.workers.config import FSDPEngineConfig
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
@@ -217,6 +277,9 @@ def compute_advantage(
         ###
         if "sid" in data.non_tensor_batch:
             from resadapt.reward_fn.advantage import compute_allocator_advantage
+
+            # Hydra: algorithm.use_cost, cost_*_coef, min/max_scale, centered_term, etc.
+            # (see config/pred_config.yaml and scripts/main.sh when SCALE_ENABLE_SCALE=1).
             use_cost_value = config.get("use_cost", None)
             scale_multi_modal_data = config.get("scale_multi_modal_data", "")
             global_step = 0
@@ -241,7 +304,11 @@ def compute_advantage(
                     use_cost_value = f"{base_ideal}{switch_suffix}"
                 else:
                     use_cost_value = f"{base_rank}{switch_suffix}"
-                print(f"switch use_cost to ${use_cost_value}")
+                print(f"switch use_cost to {use_cost_value}")
+                
+            # Update the config so downstream processes (like allocator update) see the modified use_cost
+            config.use_cost = use_cost_value
+            data.meta_info["use_cost"] = use_cost_value
 
 
             allocator_advantages, allocator_update_mask = compute_allocator_advantage(
@@ -259,8 +326,9 @@ def compute_advantage(
                 encouragement_coef=config.get("cost_encouragement_coef", 0.02),
                 max_scale=config.get("max_scale", 2.0),
                 min_scale=config.get("min_scale", 0.25),
+                init_scale_mean=float(config.get("init_scale_mean", 1.0)),
                 use_discrete_action=config.get("use_discrete_action", False),
-                rewards=data.non_tensor_batch["reward_extra_info"],
+                rewards=_per_sample_reward_extras_from_batch(data),
                 centered_term=config.get("centered_term", 0.5),
                 frame_metrics=data.batch.get("frame_metrics"),
             )
@@ -749,6 +817,8 @@ class RayPPOTrainer:
         size_divisor = max(self.config.actor_rollout_ref.rollout.agent.num_workers, self.config.allocator.scale.num_workers)
         padded, pad_size = pad_dataproto_to_divisor(test_batch, size_divisor)
         padded.meta_info["eval_mode"] = True
+        if "use_cost" not in padded.meta_info:
+            padded.meta_info["use_cost"] = self.config.algorithm.get("use_cost", "")
 
         scaled_padded = self.allocator_wg.scale_multi_modal(padded)
         scaled = unpad_dataproto(scaled_padded, pad_size=pad_size)
@@ -1680,6 +1750,9 @@ class RayPPOTrainer:
 
         rollout_config = self.config.actor_rollout_ref.rollout
         batch_scaled.meta_info["multi_turn"] = rollout_config.multi_turn.enable
+        # Pass use_cost from algorithm config to allocator worker via meta_info
+        if "use_cost" not in batch_scaled.meta_info:
+            batch_scaled.meta_info["use_cost"] = self.config.algorithm.get("use_cost", "")
         # TODO: Make "temperature" single source of truth from generation.
         batch_scaled.meta_info["temperature"] = rollout_config.temperature
         # update allocator
@@ -1720,7 +1793,11 @@ class RayPPOTrainer:
             allocator_output = self.allocator_wg.update_allocator(batch_scaled)
 
         batch.meta_info["metrics"] = allocator_output.meta_info["metrics"]
-        scale_multi_modal_data = str(self.config.allocator.get("scale_multi_modal_data", "scale")).lower()
+        # Align with algorithm/rollout tag (main.sh sets all three; manual overrides may not).
+        scale_tag = resolve_scale_multi_modal_data_tag(self.config)
+        if not scale_tag:
+            scale_tag = str(self.config.allocator.get("scale_multi_modal_data") or "scale")
+        scale_multi_modal_data = str(scale_tag).lower()
         if self.config.algorithm.get("use_filter_sid", False) and "ispred" in scale_multi_modal_data:
             if self.config.allocator.get("scale_n", 1) > 1:
                 batch.batch["allocator_log_probs"] = align_allocator_log_probs_to_batch(
@@ -1876,6 +1953,9 @@ class RayPPOTrainer:
                             batch.non_tensor_batch["scale_one_mask"] = scale_one_mask
 
                     with marked_timer("scale", timing_raw, color="cyan"):
+                        # Pass use_cost from algorithm config to allocator worker via meta_info
+                        if "use_cost" not in batch.meta_info:
+                            batch.meta_info["use_cost"] = self.config.algorithm.get("use_cost", "")
                         batch = self.allocator_wg.scale_multi_modal(batch)
                         sync_frame_metrics(batch.batch, batch.batch)
 
@@ -2026,8 +2106,7 @@ class RayPPOTrainer:
                             batch = batch.union(values)
 
                     with marked_timer("adv", timing_raw, color="brown"):
-                        # we combine with rule-based rm
-                        reward_extra_infos_dict: dict[str, list]
+                        # Rule-based RM + optional KL: token_level_scores from extract_reward extras.
                         batch.batch["token_level_scores"] = reward_tensor
 
                         if reward_extra_infos_dict:
@@ -2063,6 +2142,7 @@ class RayPPOTrainer:
                         )  # GRPO adv normalization factor
 
                         batch.meta_info["global_steps"] = self.global_steps
+                        adv_cfg = _algorithm_config_with_scale_tag(self.config.algorithm, self.config)
                         batch = compute_advantage(
                             batch,
                             adv_estimator=self.config.algorithm.adv_estimator,
@@ -2070,7 +2150,7 @@ class RayPPOTrainer:
                             lam=self.config.algorithm.lam,
                             num_repeat=self.config.actor_rollout_ref.rollout.n,
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
-                            config=self.config.algorithm,
+                            config=adv_cfg,
                         )
 
                     # update critic
@@ -2094,7 +2174,7 @@ class RayPPOTrainer:
                         # breakpoint()
                         # print("update actor")
                         # update actor (skip if actor is frozen based on scale_multi_modal_data config)
-                        scale_multi_modal_data = str(self.config.get("scale_multi_modal_data", "")).lower()
+                        scale_multi_modal_data = _resolve_scale_multi_modal_tag(self.config).lower()
                         if scale_multi_modal_data and "actor_frozen" in scale_multi_modal_data:
                             if self.rank == 0:
                                 print("[trainer] Skipping actor update (actor is frozen).")

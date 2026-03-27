@@ -60,6 +60,13 @@ usage() {
     echo "  --debug 0/1               Debug mode flag (0 for off, 1 for on) (default: ${DEBUG})"
     echo "  -h, --help                Show this help message"
     echo ""
+    echo "Environment (cost / advantage):"
+    echo "  SCALE_ENABLE_COST=0|1     (default: ${SCALE_ENABLE_COST})"
+    echo "  SCALE_USE_COST            Short tag, e.g. capo, piecewise_v2, saliency_share_v1 (default: ${SCALE_USE_COST})"
+    echo "  SCALE_COST_ENCOURAGEMENT_COEF  (default: ${SCALE_COST_ENCOURAGEMENT_COEF})"
+    echo "  SCALE_COST_PENALTY_COEF        (default: ${SCALE_COST_PENALTY_COEF})"
+    echo "  SCALE_CENTERED_TERM       (default: ${SCALE_CENTERED_TERM})"
+    echo ""
     echo "Note: Positional arguments are also supported for backward compatibility:"
     echo "  $0 [model_path] [scale_data] [prompt_len] [resp_len] [strategy] [max_scale] [n_resp] [scale_n] [lr] [debug]"
 }
@@ -137,6 +144,14 @@ TEST_FILE=${TEST_FILE:-"${PROJECT_ROOT}/data/test.parquet"}
 # ==============================================================================
 # 4. Scale Configuration Tags
 # ==============================================================================
+# Assembles SCALE_MULTI_MODAL_DATA (underscore-separated pieces). Passed to Hydra as
+# algorithm.scale_multi_modal_data, allocator.scale_multi_modal_data, and
+# actor_rollout_ref.scale_multi_modal_data when SCALE_ENABLE_SCALE=1 (section 6).
+#
+# Substring reference (full table): resadapt/utils/scale_multi_modal_tags.py
+# Not in scale_parts below but used in code when appended manually: aw (frame-aware),
+# ispred (predictor log-prob alignment with use_filter_sid), hadw (GRPO cost path).
+#
 # Base scale configurations
 SCALE_BASE=${SCALE_BASE:-"${SCALE_MULTI_MODAL_DATA}"} # Base identifier for the scale config
 SCALE_ENABLE_SEP=${SCALE_ENABLE_SEP:-"0"}             # Enable separate allocation node
@@ -150,11 +165,16 @@ SCALE_ENABLE_NOTEST=${SCALE_ENABLE_NOTEST:-"0"}       # Disable validation/testi
 SCALE_ENABLE_ACTOR_FROZEN=${SCALE_ENABLE_ACTOR_FROZEN:-"0"}       # Freeze entire actor model
 SCALE_ENABLE_ALLOCATOR_FROZEN=${SCALE_ENABLE_ALLOCATOR_FROZEN:-"1"} # Freeze actor except allocator
 
-# Cost-related scale configurations
-SCALE_ENABLE_COST=${SCALE_ENABLE_COST:-"1"}           # Enable cost-aware reward
-SCALE_USE_COST=${SCALE_USE_COST:-"capo"}              # Cost method (supported: gdpo, mygdpo, capo, saliency_share_v1)
-SCALE_COST_ENCOURAGEMENT_COEF=${SCALE_COST_ENCOURAGEMENT_COEF:-"0.25"} # Coefficient for cost encouragement
-SCALE_CENTERED_TERM=${SCALE_CENTERED_TERM:-"0.4"}     # Centered term for cost calculation
+# Cost / allocator advantage (algorithm.use_cost; script appends "_acc")
+# capo (default): cost-aware mix — group z-score on acc, optional HADW, correct/wrong vs
+#   normalized mean scale + gas tax; optional frame terms if frame_metrics exist (see advantage.py).
+# Other SCALE_USE_COST: gdpo | mygdpo | piecewise_v1 | piecewise_v2 | saliency_share_v1 (…).
+# piecewise_* defaults live in piecewise_adaptive_cost.py + advantage.py; optional overrides e.g. gas(0.03), noframeaux.
+SCALE_ENABLE_COST=${SCALE_ENABLE_COST:-"1"}
+SCALE_USE_COST=${SCALE_USE_COST:-"capo"}
+SCALE_COST_ENCOURAGEMENT_COEF=${SCALE_COST_ENCOURAGEMENT_COEF:-"0.25"}
+SCALE_COST_PENALTY_COEF=${SCALE_COST_PENALTY_COEF:-"0.05"}
+SCALE_CENTERED_TERM=${SCALE_CENTERED_TERM:-"0.4"}
 
 # Build scale configuration name
 scale_parts=("${SCALE_BASE}")
@@ -279,6 +299,8 @@ ray_env_args+=( "+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_MROPE_PATCH='${V
 # ==============================================================================
 # 6. Scale Features Assembly
 # ==============================================================================
+# When SCALE_ENABLE_SCALE=1, extra_args push allocator + actor_rollout_ref overrides and
+# sync scale_multi_modal_data across algorithm/allocator/rollout (see scale_multi_modal_tags.py).
 exp_name="${SCALE_MULTI_MODAL_DATA}-${STRATEGY}-${MODEL_SIZE}-bsz${train_prompt_bsz}-mini${train_prompt_mini_bsz}-n${N_RESP_PER_PROMPT}-len${PROMPT_LEN}-resp${RESP_LEN}"
 
 if [[ "${SCALE_ENABLE_SCALE}" == "1" ]]; then
@@ -291,6 +313,8 @@ if [[ "${SCALE_ENABLE_SCALE}" == "1" ]]; then
     extra_args+=( "algorithm.max_scale=${MAX_SCALE}" )
     extra_args+=( "algorithm.min_scale=${min_scale}" )
     extra_args+=( "algorithm.use_discrete_action=${use_discrete_action}" )
+    # Keep algorithm.scale_multi_modal_data in sync with allocator/rollout so GRPO hadw/switch logic in ray_trainer sees the tag.
+    extra_args+=( "algorithm.scale_multi_modal_data=${SCALE_MULTI_MODAL_DATA}" )
 
     extra_args+=( "allocator.enable=True" )
     extra_args+=( "allocator.scale_multi_modal_data=${SCALE_MULTI_MODAL_DATA}" )
@@ -336,7 +360,10 @@ if [[ "${SCALE_ENABLE_SCALE}" == "1" ]]; then
     if [[ "${SCALE_ENABLE_COST}" == "1" ]]; then
         extra_args+=( "algorithm.use_cost=${SCALE_USE_COST}_acc" )
         if [[ -n "${SCALE_COST_ENCOURAGEMENT_COEF}" ]]; then extra_args+=( "algorithm.cost_encouragement_coef=${SCALE_COST_ENCOURAGEMENT_COEF}" ); fi
+        if [[ -n "${SCALE_COST_PENALTY_COEF}" ]]; then extra_args+=( "algorithm.cost_penalty_coef=${SCALE_COST_PENALTY_COEF}" ); fi
         if [[ -n "${SCALE_CENTERED_TERM}" ]]; then extra_args+=( "algorithm.centered_term=${SCALE_CENTERED_TERM}" ); fi
+    else
+        extra_args+=( "algorithm.use_cost=null" )
     fi
 fi
 

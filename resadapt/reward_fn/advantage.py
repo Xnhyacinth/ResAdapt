@@ -1,9 +1,51 @@
+"""
+Allocator / predictor advantage computation for GRPO-style training.
+
+This module implements `compute_allocator_advantage`, which assigns group-normalized
+advantages per (uid, sid) using optional cost-aware strings in ``use_cost``
+(e.g. ``capo``, ``saliency_share_v1_*``). Summaries for **capo** / **piecewise** are
+below; other tags parse coefficients (``gas``, ``gasq``, ``sg``, ``effb``, …) per branch.
+
+Hydra / ``main.sh`` should set ``algorithm.use_cost``, ``algorithm.min_scale``,
+``algorithm.max_scale``, ``algorithm.init_scale_mean`` (for excess-only gas),
+and mirror ``algorithm.scale_multi_modal_data`` with ``allocator.scale_multi_modal_data``
+so ``hadw`` / ``switch`` heuristics in ``ray_trainer.compute_advantage`` see the tag.
+
+**Capo** (``capo``): group z-score on accuracy (or rollout score if the tag has no
+``acc``), optional HADW difficulty reweighting, then a **mixed cost term** — reward
+lower normalized mean scale when the response is correct and penalize high cost when
+wrong, blended with ``alpha`` / ``tau``, minus **gas** × cost; optional per-frame
+bonuses when ``frame_metrics`` are present (``framecoef``, ``framecap``, ``wkeep``, …).
+
+**Piecewise** (``piecewise_v1`` / ``piecewise_v2``): use short tags only; numeric knobs
+(gas, frameaux, wwaste, …) use defaults in code / ``piecewise_adaptive_cost`` unless
+overridden with optional tokens like ``gas(0.03)``. ``piecewise_v2`` enables frame
+auxiliary advantages by default (disable with ``noframeaux``); ``piecewise_v1`` needs
+``frameaux`` in the tag for the same.
+
+Allocator workers enable the forward flag ``compute_frame_metrics`` when
+``resadapt.utils.use_cost_frame_metrics.use_cost_implies_compute_frame_metrics`` is true
+(or when ``scale_multi_modal_data`` contains ``aw``); keep that helper aligned with any
+new ``use_cost`` branch that reads ``frame_metrics`` below.
+"""
+
 import torch
 import numpy as np
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from collections import defaultdict
 import re
 import warnings
+
+from resadapt.utils.utils import compute_scales_and_sample_means_cpu
+from resadapt.reward_fn.piecewise_adaptive_cost import piecewise_group_advantage
+
+# Defaults for short tags ``piecewise_v2`` / ``piecewise_v1`` (optional ``gas(x)``, ``frameaux(x)``, … override)
+PIECEWISE_V2_GAS_DEFAULT = 0.05
+PIECEWISE_V2_FRAMEAUX_COEF = 0.22
+PIECEWISE_V2_SPREAD_MIN = 0.04
+PIECEWISE_V2_REDIST_MIX = 0.4
+PIECEWISE_V2_WRONG_HACK_GATE = 0.62
+PIECEWISE_FRAMEAUX_COEF_FALLBACK = 0.22
 
 _HADW_STATE: Dict[str, float] = {}
 _FRAMEPAIR_V1_WARNED = False
@@ -16,6 +58,19 @@ def _hadw_reweight_advantages(
     use_cost_l: str,
     epsilon: float,
 ) -> torch.Tensor:
+    """
+    Reweight advantages based on difficulty (HADW algorithm).
+    Harder samples get higher weights.
+    
+    Args:
+        advs: Advantage tensor.
+        difficulty: Difficulty tensor for each sample.
+        use_cost_l: Lowercase string containing cost configuration.
+        epsilon: Small constant to avoid division by zero.
+        
+    Returns:
+        Reweighted advantage tensor.
+    """
     if "hadw" not in use_cost_l:
         return advs
 
@@ -207,7 +262,18 @@ def _compute_active_frame_importance(
     detail_score: Optional[torch.Tensor],
     valid_row: torch.Tensor,
 ) -> torch.Tensor:
-    """Typed active-path importance: semantic relevance + novelty (+ optional detail)."""
+    """
+    Compute frame importance based on semantic relevance and novelty.
+    
+    Args:
+        redundancy: Frame redundancy score.
+        relevance_raw: Frame relevance score.
+        detail_score: Optional frame detail score.
+        valid_row: Boolean mask for valid frames.
+        
+    Returns:
+        Importance score tensor for active frames.
+    """
     redundancy = redundancy.clamp(0.0, 1.0)
     novelty = 1.0 - redundancy
     relevance = ((relevance_raw + 1.0) * 0.5).clamp(0.0, 1.0)
@@ -250,6 +316,46 @@ def _compute_framepair_bonus(
     redistribution_reward = target_share - actual_share
     redistribution_reward = torch.where(valid_row, redistribution_reward, torch.zeros_like(redistribution_reward))
     return _masked_zscore(redistribution_reward, valid_row, eps=eps)
+
+
+def _compute_piecewise_frame_aux_bonus(
+    importance: torch.Tensor,
+    scales01: torch.Tensor,
+    valid_row: torch.Tensor,
+    eps: float,
+    *,
+    redist_mix: float = 0.4,
+    spread_min: float = 0.04,
+    acc_sid: float = 1.0,
+    cost_sid: float = 0.0,
+    wrong_hack_gate: float = 0.62,
+) -> torch.Tensor:
+    """
+    Frame-level signal for piecewise + ``frameaux``: mix active allocation z-score with
+    redistribution z-score, then gate by inter-frame scale spread (low spread → small bonus).
+    When the sid is wrong and cost is already high, shrink bonus to limit gaming resolution.
+    """
+    alloc_b = _compute_active_frame_bonus(importance, scales01, valid_row, eps)
+    redist_b = _compute_framepair_bonus(importance, scales01, valid_row, eps)
+    rm = float(max(0.0, min(1.0, redist_mix)))
+    combined = (1.0 - rm) * alloc_b + rm * redist_b
+
+    n_valid = int(valid_row.sum().item())
+    if n_valid >= 2:
+        std = scales01[valid_row].std(unbiased=False)
+    else:
+        std = torch.zeros((), device=scales01.device, dtype=scales01.dtype)
+    spread_min_t = torch.tensor(spread_min, device=std.device, dtype=std.dtype)
+    var_gate = torch.sigmoid((std - spread_min_t) * 80.0)
+    bonus = combined * var_gate.to(dtype=combined.dtype)
+
+    if acc_sid < 0.5 and cost_sid > wrong_hack_gate:
+        denom = max(1e-6, 1.0 - wrong_hack_gate)
+        excess = min(1.0, (cost_sid - wrong_hack_gate) / denom)
+        shrink = 1.0 - 0.45 * excess
+        bonus = bonus * shrink
+
+    return bonus
 
 
 def _masked_normalized_share(
@@ -319,6 +425,7 @@ def compute_allocator_advantage(
     encouragement_coef: float = 0.02,
     min_scale: float = 0.25,
     max_scale: float = 2.0,
+    init_scale_mean: float = 1.0,
     rewards: Optional[list] = None,
     centered_term: float = 0.5,
     frame_metrics: Optional[Dict[str, torch.Tensor]] = None,  # Frame metrics from allocator
@@ -326,12 +433,20 @@ def compute_allocator_advantage(
     """
     Compute allocator advantages.
 
+    ``rewards`` should be a list of per-sample dicts (e.g. ``acc_reward`` from the custom
+    reward), built from flat ``non_tensor_batch`` keys via
+    ``_per_sample_reward_extras_from_batch`` in ``ray_trainer.py``. If ``None`` or empty,
+    cost-related terms fall back to summed token scores.
+
     Pipeline (GDPO-consistent):
       - Group by uid (prompt-group)
       - For each uid, compute sid-level avg score(s)
       - Compute group-wise advantage per uid
       - Optionally apply batch-wise normalization (Eq.6) over unique sid advantages
       - Expand to per-object advantage via scale_mask if provided
+
+    For ``saliency_share_v1``, normalized mean-scale cost uses an anchor derived from
+    ``init_scale_mean`` unless ``fullgas`` is present in ``use_cost`` (legacy full-range penalty).
 
     Returns:
       allocator_advantages: (B, Tobj) if scale_mask else (B,)
@@ -415,10 +530,21 @@ def compute_allocator_advantage(
         sid2cost = {s_key: float(torch.stack(vs).mean().item()) for s_key, vs in sid2cost_values.items()}
 
     sid2advantage: Dict[Any, torch.Tensor] = {}
+    _piecewise_frameaux_eligible = (
+        bool(use_cost_l)
+        and frame_metrics is not None
+        and (
+            ("piecewise_v2" in use_cost_l and "noframeaux" not in use_cost_l)
+            or ("frameaux" in use_cost_l)
+        )
+    )
     per_sid_frame_adv_all: Dict[Any, torch.Tensor] | None = (
         {}
         if use_cost_l is not None
-        and any(key in use_cost_l for key in ("capo", "framepair_v1", "saliency_share_v1"))
+        and (
+            any(key in use_cost_l for key in ("capo", "framepair_v1", "saliency_share_v1"))
+            or _piecewise_frameaux_eligible
+        )
         and scale_mask is not None
         and scales is not None
         else None
@@ -437,6 +563,7 @@ def compute_allocator_advantage(
 
         if use_cost:
             use_cost_l = use_cost.lower()
+            # Calculate cost ratio (0 to 1) based on the sample scales
             costs = _safe_tensor_from_list([sid2cost[sid_] for sid_ in sids_list],
                                            device=device, dtype=torch.float32)  # (M,)
             cost_ratio = costs.clamp(min=0.0, max=1.0)
@@ -444,6 +571,8 @@ def compute_allocator_advantage(
 
             current_accs = _safe_tensor_from_list([float(sid2acc_avg[sid_].item()) for sid_ in sids_list],
                                                   device=device, dtype=torch.float32)
+            
+            # Determine if response is correct based on accuracy threshold
             if "acc" in use_cost_l:
                 is_correct_mask = (current_accs > 0.35)
             else:
@@ -458,10 +587,47 @@ def compute_allocator_advantage(
                 base_adv = _group_zscore(base_signal, eps=epsilon)
 
                 gas_match = re.search(r"gas([0-9]*\.?[0-9]+)", use_cost_l)
-                gas_tax = float(gas_match.group(1)) if gas_match else 0.05
+                gas_tax = float(gas_match.group(1)) if gas_match else penalty_coef
                 gas_tax = max(0.0, gas_tax)
 
-                advs = base_adv - gas_tax * cost_ratio.to(base_adv.dtype)
+                gasq_match = re.search(r"gasq([0-9]*\.?[0-9]+)", use_cost_l)
+                gasq_coef = float(gasq_match.group(1)) if gasq_match else 0.0
+                gasq_coef = max(0.0, gasq_coef)
+
+                sg_match = re.search(r"sg([0-9]*\.?[0-9]+)", use_cost_l)
+                sg_coef = float(sg_match.group(1)) if sg_match else 0.0
+                sg_coef = max(0.0, sg_coef)
+
+                cost_f = cost_ratio.to(base_adv.dtype)
+                use_full_gas = "fullgas" in use_cost_l
+                cost_anchor = float(
+                    (init_scale_mean - min_scale) / (max_scale - min_scale + 1e-6)
+                )
+                cost_anchor = max(0.0, min(1.0, cost_anchor))
+                cost_anchor_t = torch.tensor(cost_anchor, device=cost_f.device, dtype=cost_f.dtype)
+                cost_pen = cost_f if use_full_gas else torch.relu(cost_f - cost_anchor_t)
+
+                base_adv_used = base_adv
+                if sg_coef > 0.0:
+                    base_adv_used = base_adv * (1.0 - sg_coef * cost_pen)
+
+                advs = base_adv_used - gas_tax * cost_pen
+                if gasq_coef > 0.0:
+                    advs = advs - gasq_coef * (cost_pen * cost_pen)
+
+                if "effb" in use_cost_l:
+                    effb_match = re.search(r"effb([0-9]*\.?[0-9]+)", use_cost_l)
+                    effb_scale = float(effb_match.group(1)) if effb_match else 1.0
+                    effb_scale = max(0.0, effb_scale)
+                    advs = advs + (effb_scale * efficiency_bonus).to(advs.dtype)
+
+                sscale_match = re.search(r"sscale([0-9]*\.?[0-9]+)", use_cost_l)
+                share_scale = float(sscale_match.group(1)) if sscale_match else 1.0
+                share_scale = max(0.0, share_scale)
+
+                mall_match = re.search(r"mall([0-9]*\.?[0-9]+)", use_cost_l)
+                mall_coef = float(mall_match.group(1)) if mall_match else 0.0
+                mall_coef = max(0.0, mall_coef)
 
                 if frame_metrics is not None and scale_mask is not None and scales is not None and per_sid_frame_adv_all is not None:
                     sid_index_map: Dict[Any, List[int]] = defaultdict(list)
@@ -557,10 +723,17 @@ def compute_allocator_advantage(
                             eps=epsilon,
                         )
                         share_bonus = _masked_zscore(target_share - actual_share, valid_row, eps=epsilon)
+                        share_bonus = share_scale * share_bonus
+
+                        adv_scalar = advs[k]
+                        if mall_coef > 0.0:
+                            n_valid = valid_row.float().sum().clamp_min(1.0)
+                            misalloc = ((scales01 * (1.0 - target_share)) * valid_row.float()).sum() / n_valid
+                            adv_scalar = adv_scalar - mall_coef * misalloc.to(dtype=adv_scalar.dtype)
 
                         adv_vec = torch.where(
                             valid_row,
-                            advs[k] + share_bonus.to(dtype),
+                            adv_scalar + share_bonus.to(dtype),
                             torch.zeros_like(share_bonus, dtype=dtype),
                         )
                         per_sid_frame_advs[s_key] = adv_vec.to(device=device, dtype=dtype)
@@ -611,7 +784,7 @@ def compute_allocator_advantage(
                 base_adv = _hadw_reweight_advantages(base_adv, difficulty, use_cost_l=use_cost_l, epsilon=epsilon)
 
                 gas_match = re.search(r"gas([0-9]*\.?[0-9]+)", use_cost_l)
-                gas_tax = float(gas_match.group(1)) if gas_match else 0.05
+                gas_tax = float(gas_match.group(1)) if gas_match else penalty_coef
                 gas_tax = max(0.0, gas_tax)
 
                 advs = base_adv - gas_tax * cost_ratio.to(base_adv.dtype)
@@ -707,6 +880,7 @@ def compute_allocator_advantage(
 
                 custom_adv_calculated = True
 
+            # capo: cost-aware mixed advantage (acc z-score + optional HADW + correct/wrong vs cost + gas; see module docstring).
             elif "capo" in use_cost_l:
                 base_signal = current_accs if "acc" in use_cost_l else s_scores_tensor.float()
                 base_adv = _group_zscore(base_signal, eps=epsilon)
@@ -737,7 +911,7 @@ def compute_allocator_advantage(
                     tau = max(tau, epsilon)
 
                     gas_match = re.search(r"gas([0-9]*\.?[0-9]+)", use_cost_l)
-                    gas_tax = float(gas_match.group(1)) if gas_match else 0.05
+                    gas_tax = float(gas_match.group(1)) if gas_match else penalty_coef
                     gas_tax = max(0.0, gas_tax)
 
                     accpow_match = re.search(r"accpow([0-9]*\.?[0-9]+)", use_cost_l)
@@ -896,6 +1070,174 @@ def compute_allocator_advantage(
 
                 if is_correct_mask.any() and ("noclamp" not in use_cost_l) and (not default_noclamp):
                     advs = torch.where(is_correct_mask, advs.clamp(min=0.001), advs)
+
+                custom_adv_calculated = True
+
+            elif "piecewise_v1" in use_cost_l or "piecewise_v2" in use_cost_l:
+                current_accs = _safe_tensor_from_list(
+                    [float(sid2acc_avg[sid_].item()) for sid_ in sids_list],
+                    device=device,
+                    dtype=torch.float32,
+                )
+                costs = _safe_tensor_from_list(
+                    [sid2cost[sid_] for sid_ in sids_list],
+                    device=device,
+                    dtype=torch.float32,
+                )
+                cost_ratio = costs.clamp(min=0.0, max=1.0)
+                advs, _ = piecewise_group_advantage(
+                    current_accs,
+                    cost_ratio,
+                    use_cost_l,
+                    epsilon=epsilon,
+                )
+                gas_match = re.search(r"gas\(([0-9]*\.?[0-9]+)\)", use_cost_l)
+                if not gas_match:
+                    gas_match = re.search(r"gas([0-9]*\.?[0-9]+)", use_cost_l)
+                if gas_match:
+                    gas_tax = float(gas_match.group(1))
+                elif "piecewise_v2" in use_cost_l:
+                    gas_tax = PIECEWISE_V2_GAS_DEFAULT
+                else:
+                    gas_tax = 0.0
+                gas_tax = max(0.0, gas_tax)
+                if gas_tax > 0.0:
+                    advs = advs - gas_tax * cost_ratio.to(advs.dtype)
+
+                _pw_frameaux = (
+                    ("piecewise_v2" in use_cost_l and "noframeaux" not in use_cost_l)
+                    or ("piecewise_v1" in use_cost_l and "frameaux" in use_cost_l)
+                )
+                if (
+                    _pw_frameaux
+                    and frame_metrics is not None
+                    and scale_mask is not None
+                    and scales is not None
+                    and per_sid_frame_adv_all is not None
+                ):
+                    fa_match = re.search(r"frameaux\(([0-9]*\.?[0-9]+)\)", use_cost_l)
+                    if fa_match:
+                        frameaux_coef = float(fa_match.group(1))
+                    elif "piecewise_v2" in use_cost_l:
+                        frameaux_coef = PIECEWISE_V2_FRAMEAUX_COEF
+                    else:
+                        frameaux_coef = PIECEWISE_FRAMEAUX_COEF_FALLBACK
+                    smin_match = re.search(r"spreadmin\(([0-9]*\.?[0-9]+)\)", use_cost_l)
+                    spread_min = float(smin_match.group(1)) if smin_match else PIECEWISE_V2_SPREAD_MIN
+                    rm_match = re.search(r"redmix\(([0-9]*\.?[0-9]+)\)", use_cost_l)
+                    redist_mix = float(rm_match.group(1)) if rm_match else PIECEWISE_V2_REDIST_MIX
+                    wh_match = re.search(r"wrhog\(([0-9]*\.?[0-9]+)\)", use_cost_l)
+                    wrong_hack_gate = float(wh_match.group(1)) if wh_match else PIECEWISE_V2_WRONG_HACK_GATE
+                    fc_match = re.search(r"framecap\(([0-9]*\.?[0-9]+)\)", use_cost_l)
+                    frame_cap = float(fc_match.group(1)) if fc_match else 0.0
+                    frame_cap = max(0.0, frame_cap)
+
+                    sid_index_map: Dict[Any, List[int]] = defaultdict(list)
+                    for idx_b in range(bsz):
+                        sid_index_map[_as_py_key(sid[idx_b])].append(idx_b)
+
+                    max_len = int(scale_mask.shape[1])
+                    fm_rel = frame_metrics.get("text_relevance", None)
+                    fm_redundancy = frame_metrics.get("redundancy", None)
+                    fm_detail = frame_metrics.get("detail_score", None)
+
+                    per_sid_frame_advs_pw: Dict[Any, torch.Tensor] = {}
+                    for k, s_key in enumerate(sids_list):
+                        idxs = sid_index_map.get(s_key, [])
+                        if not idxs:
+                            z = torch.zeros((max_len,), device=device, dtype=dtype)
+                            per_sid_frame_advs_pw[s_key] = z
+                            continue
+
+                        valid_row = _compute_sid_frame_valid_mask(scale_mask, idxs)
+                        scales_row = _aggregate_sid_frame_values(
+                            scales,
+                            scale_mask,
+                            idxs,
+                            default=min_scale,
+                            device=device,
+                            dtype=dtype,
+                        )
+                        scales01 = (scales_row - min_scale) / (max_scale - min_scale + 1e-6)
+                        scales01 = scales01.clamp(0.0, 1.0)
+
+                        redundancy_row = _aggregate_sid_frame_values(
+                            fm_redundancy,
+                            scale_mask,
+                            idxs,
+                            default=0.0,
+                            device=device,
+                            dtype=scales01.dtype,
+                        )
+                        relevance_row = _aggregate_sid_frame_values(
+                            fm_rel,
+                            scale_mask,
+                            idxs,
+                            default=0.0,
+                            device=device,
+                            dtype=scales01.dtype,
+                        )
+                        detail_row = (
+                            _aggregate_sid_frame_values(
+                                fm_detail,
+                                scale_mask,
+                                idxs,
+                                default=0.0,
+                                device=device,
+                                dtype=scales01.dtype,
+                            )
+                            if fm_detail is not None
+                            else None
+                        )
+
+                        importance = _compute_active_frame_importance(
+                            redundancy_row,
+                            relevance_row,
+                            detail_row,
+                            valid_row,
+                        )
+                        acc_sid = float(current_accs[k].item())
+                        cost_sid = float(cost_ratio[k].item())
+
+                        allocation_bonus = _compute_piecewise_frame_aux_bonus(
+                            importance,
+                            scales01,
+                            valid_row,
+                            epsilon,
+                            redist_mix=redist_mix,
+                            spread_min=spread_min,
+                            acc_sid=acc_sid,
+                            cost_sid=cost_sid,
+                            wrong_hack_gate=wrong_hack_gate,
+                        )
+                        allocation_bonus = frameaux_coef * allocation_bonus
+                        if frame_cap > 0.0:
+                            allocation_bonus = allocation_bonus.clamp(min=-frame_cap, max=frame_cap)
+                            allocation_bonus = allocation_bonus - allocation_bonus[valid_row].mean()
+                        allocation_bonus = torch.where(
+                            valid_row,
+                            allocation_bonus,
+                            torch.zeros_like(allocation_bonus),
+                        )
+
+                        adv_vec = torch.where(
+                            valid_row,
+                            advs[k] + allocation_bonus.to(dtype),
+                            torch.zeros_like(allocation_bonus, dtype=dtype),
+                        )
+                        per_sid_frame_advs_pw[s_key] = adv_vec.to(device=device, dtype=dtype)
+                        per_sid_frame_adv_all[s_key] = adv_vec.to(device=device, dtype=dtype)
+
+                    frame_adv_pw = torch.stack([per_sid_frame_advs_pw[s_key] for s_key in sids_list], dim=0)
+                    valid_mask_m_pw = torch.stack(
+                        [
+                            _compute_sid_frame_valid_mask(scale_mask, sid_index_map.get(s_key, []))
+                            for s_key in sids_list
+                        ],
+                        dim=0,
+                    )
+                    denom_pw = valid_mask_m_pw.float().sum(dim=-1).clamp(min=1.0)
+                    advs = (frame_adv_pw * valid_mask_m_pw.float()).sum(dim=-1) / denom_pw
 
                 custom_adv_calculated = True
 

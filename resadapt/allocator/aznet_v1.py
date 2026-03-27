@@ -1231,14 +1231,22 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
         return raw_actions, scales, log_probs, scale_mask_out
 
 
-    def get_scale_mask(self, visual_grid_thw, visual_per_sample, max_frames, device):
+    def get_scale_mask(self, visual_grid_thw: torch.Tensor, visual_per_sample: list[int], max_frames: int, device: torch.device):
         """
-        Generate Scale Mask
+        Generate a boolean mask indicating the valid frames/scales for each sample in a batch.
         
         Args:
-            visual_grid_thw: [Total_Objects, 3]
-            visual_per_sample: List[int], e.g. [2, 1, 1]
-            max_frames
+            visual_grid_thw (torch.Tensor): Tensor of shape [Total_Objects, 3], where the first column 
+                                            contains the temporal dimension (number of frames).
+            visual_per_sample (list[int]): A list indicating how many visual objects each sample has. 
+                                           e.g., [2, 1, 1] means sample 0 has 2 objects, sample 1 has 1, etc.
+            max_frames (int): The maximum number of frames to pad the mask to.
+            device (torch.device): The device to create the mask on.
+            
+        Returns:
+            tuple:
+                - scale_mask (torch.Tensor): Boolean mask of shape [Batch, Max_Frames].
+                - valid_lengths (torch.Tensor): Tensor containing the total valid frames per sample.
         """
         # e.g., [1, 1, 1, 7]
         object_t_dims = visual_grid_thw[:, 0]
@@ -1259,21 +1267,22 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
         return scale_mask, valid_lengths
 
 
-    def restructure_sequence(self, flat_tensor, visual_grid_thw, target_mask, pad_val, device):
+    def restructure_sequence(self, flat_tensor: torch.Tensor, visual_grid_thw: torch.Tensor, target_mask: torch.Tensor, pad_val: float, device: torch.device):
         """
-        Extract valid values from a flattened tensor with invalid padding and map them to a target matrix 
-        according to the target mask, using temporal dimension info from visual_grid_thw.
+        Extracts valid values from a flattened tensor containing invalid padding and maps them to a target matrix 
+        according to the target mask, using temporal dimension info from `visual_grid_thw`.
         
         Args:
-            flat_tensor: Tensor of shape (Total_Objects, Max_Len_Temp) (e.g., (4, 7)), containing invalid padding values.
-            visual_grid_thw: Tensor of shape (Total_Objects, 3). The first column stores temporal dimension (T) 
-                            which determines the valid length of each row in flat_tensor.
-            target_mask: Boolean tensor of shape (Batch_Size, Max_Len) (e.g., (3, 7)) indicating valid positions 
-                        in the target matrix (True = valid position to fill, False = padding position).
-            pad_val: Scalar value to fill the padding positions in the output tensor.
+            flat_tensor (torch.Tensor): Tensor of shape (Total_Objects, Max_Len_Temp) (e.g., (4, 7)), containing invalid padding values.
+            visual_grid_thw (torch.Tensor): Tensor of shape (Total_Objects, 3). The first column stores temporal dimension (T) 
+                                            which determines the valid length of each row in `flat_tensor`.
+            target_mask (torch.Tensor): Boolean tensor of shape (Batch_Size, Max_Len) (e.g., (3, 7)) indicating valid positions 
+                                        in the target matrix (True = valid position to fill, False = padding position).
+            pad_val (float): Scalar value to fill the padding positions in the output tensor.
+            device (torch.device): The device to create the output tensor on.
         
         Returns:
-            Tensor of shape (Batch_Size, Max_Len) with valid values mapped from flat_tensor and padding filled with pad_val.
+            torch.Tensor: Tensor of shape (Batch_Size, Max_Len) with valid values mapped from `flat_tensor` and padding filled with `pad_val`.
         """
         if flat_tensor is None: 
             return None

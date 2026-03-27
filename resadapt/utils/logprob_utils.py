@@ -11,11 +11,21 @@ def align_allocator_log_probs_to_batch(
     updated_log_probs: torch.Tensor,
     old_log_probs: torch.Tensor,
 ) -> torch.Tensor:
-    """Broadcast updated allocator log-probs back to the original batch order.
+    """
+    Broadcasts updated allocator log-probabilities back to the original batch order.
 
-    `updated_sids` correspond to the filtered batch that actually ran allocator
-    PPO updates. Any original SID that was skipped should keep its old
-    allocator log-probs so the downstream actor importance ratio stays neutral.
+    `updated_sids` corresponds to the filtered batch that actually ran allocator
+    PPO updates. Any original sequence ID (SID) that was skipped will retain its old
+    allocator log-probabilities so the downstream actor importance ratio stays neutral.
+    
+    Args:
+        original_sids (np.ndarray): Array of sequence IDs for the original batch.
+        updated_sids (np.ndarray): Array of sequence IDs for the updated batch.
+        updated_log_probs (torch.Tensor): Tensor containing the new log-probabilities.
+        old_log_probs (torch.Tensor): Tensor containing the old log-probabilities.
+        
+    Returns:
+        torch.Tensor: A tensor of log-probabilities aligned to the original batch order.
     """
 
     if updated_log_probs.shape[0] != len(updated_sids):

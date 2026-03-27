@@ -2,6 +2,20 @@ from transformers import PretrainedConfig
 
 
 class SmolAllocatorConfig(PretrainedConfig):
+    """
+    Configuration class for the Smol allocator and RegressionHeadAllocatorSmol (v1/v2/v3).
+
+    This configuration holds the hyperparameters for the multimodal allocator model.
+    It reads fields that are mirrored by ``aznet_smol_v*`` and ``modeling_allocator_smol_*``.
+    Additional keys from older saved configurations are accepted via ``**kwargs`` 
+    and passed to the underlying ``PretrainedConfig``.
+
+    Note: 
+        Training-time composite tags (such as ``scale_multi_modal_data``) are not stored 
+        in this class; they are managed separately. See ``resadapt.utils.scale_multi_modal_tags`` 
+        and ``scripts/main.sh`` for details on composite tag resolution.
+    """
+
     model_type = "smol_allocator"
 
     def __init__(
@@ -28,61 +42,39 @@ class SmolAllocatorConfig(PretrainedConfig):
         use_discrete_action: bool = False,
         use_text: bool = True,
         use_differentiable_importance: bool = False,
-        use_text_encoder: bool = False,
-        text_encoder_depth: int = 0,
-        text_encoder_heads: int | None = None,
-        text_encoder_dropout: float = 0.0,
-        text_encoder_ff_mult: int = 4,
-        mlp_mode: str = "mlp",
-        vlp_mode: str = "mlp",
-        regression_head_mode: str = "mlp",
         dropout: float = 0.0,
         ff_mult: int = 4,
         scale_bins: list | None = None,
         beta_add_one: bool = True,
         beta_init_mode: str = "uniform",
-        frame_temporal_depth: int = 2,
-        use_text_conditioned_spatial: bool = False,
-        enable_rope_cache: bool = True,
-        use_dirichlet_budget: bool = False,
-        dirichlet_budget: float = 1.0,
-        dirichlet_eps: float = 1e-6,
-        use_frame_info: bool = False,
-        use_learned_pooling: bool = False,
-        frame_info_ema_alpha: float = 0.9,
-        init_head: bool = True,
-        init_scale_mean: float = 1.0,
-        init_concentration: float = 4.0,
-        init_weight_std: float = 1e-2,
-        dirichlet_logit_noise_std: float = 0.0,
-        dirichlet_init_weight_std: float | None = None,
-        force_uniform_ab: bool = False,
-        layer_weighted_num_layers: int = 0,
-        layer_fusion_mode: str = "none",
-        layer_fusion_indices: list | None = None,
+        regression_head_mode: str = "mlp",
         gate_mode: str = "gumbel_softmax",
         gate_k_ratio: float = 0.25,
         gate_temperature: float = 1.0,
         gate_query_scale: float = 1.0,
         allocator_arch: str = "framewise_v3",
+        per_frame_concentration: bool = True,
+        frame_refine_depth: int = 2,
+        use_text_frame_cross_attn: bool = True,
         continuous_dist: str = "beta",
         continuous_eval_quantile: float = 0.5,
-        beta_param_scale: float = 1.0,
+        beta_param_scale: float = 0.5,
         logistic_normal_init_sigma: float = 0.7,
         categorical_temperature: float = 1.0,
-        pool_gate_mode: str = "no_ln",
+        pool_gate_mode: str = "patch_ln",
         info_fuse_mode: str = "pooled_ln",
+        init_scale_mean: float = 1.0,
+        init_concentration: float = 5.0,
         contrastive_weight: float = 0.1,
         contrastive_temperature: float = 0.1,
         contrastive_margin: float = 0.0,
-        sim_scale_weight: float = 0.0,
+        sim_scale_weight: float = 0.15,
         sim_tau: float = 0.5,
         sim_temp: float = 0.1,
         sim_gamma: float = 0.05,
         temporal_mixer_depth: int = 1,
         temporal_use_pos: bool = True,
         dual_path_depth: int = 1,
-        use_cross_attn_gate: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -108,44 +100,20 @@ class SmolAllocatorConfig(PretrainedConfig):
         self.use_discrete_action = use_discrete_action
         self.use_text = use_text
         self.use_differentiable_importance = use_differentiable_importance
-        self.use_text_encoder = use_text_encoder
-        self.text_encoder_depth = text_encoder_depth
-        self.text_encoder_heads = text_encoder_heads
-        self.text_encoder_dropout = text_encoder_dropout
-        self.text_encoder_ff_mult = text_encoder_ff_mult
-        self.use_cross_attn_gate = use_cross_attn_gate
-        self.mlp_mode = mlp_mode
-        self.vlp_mode = vlp_mode
-        self.regression_head_mode = regression_head_mode
         self.dropout = dropout
         self.ff_mult = ff_mult
         self.scale_bins = scale_bins
         self.beta_add_one = beta_add_one
         self.beta_init_mode = beta_init_mode
-        self.frame_temporal_depth = frame_temporal_depth
-        self.use_text_conditioned_spatial = use_text_conditioned_spatial
-        self.enable_rope_cache = enable_rope_cache
-        self.use_dirichlet_budget = use_dirichlet_budget
-        self.dirichlet_budget = dirichlet_budget
-        self.dirichlet_eps = dirichlet_eps
-        self.use_frame_info = use_frame_info
-        self.use_learned_pooling = use_learned_pooling
-        self.frame_info_ema_alpha = frame_info_ema_alpha
-        self.init_head = init_head
-        self.init_scale_mean = init_scale_mean
-        self.init_concentration = init_concentration
-        self.init_weight_std = init_weight_std
-        self.dirichlet_logit_noise_std = dirichlet_logit_noise_std
-        self.dirichlet_init_weight_std = dirichlet_init_weight_std
-        self.force_uniform_ab = force_uniform_ab
-        self.layer_weighted_num_layers = layer_weighted_num_layers
-        self.layer_fusion_mode = layer_fusion_mode
-        self.layer_fusion_indices = layer_fusion_indices
+        self.regression_head_mode = regression_head_mode
         self.gate_mode = gate_mode
         self.gate_k_ratio = gate_k_ratio
         self.gate_temperature = gate_temperature
         self.gate_query_scale = gate_query_scale
         self.allocator_arch = allocator_arch
+        self.per_frame_concentration = per_frame_concentration
+        self.frame_refine_depth = frame_refine_depth
+        self.use_text_frame_cross_attn = use_text_frame_cross_attn
         self.continuous_dist = continuous_dist
         self.continuous_eval_quantile = continuous_eval_quantile
         self.beta_param_scale = beta_param_scale
@@ -153,6 +121,8 @@ class SmolAllocatorConfig(PretrainedConfig):
         self.categorical_temperature = categorical_temperature
         self.pool_gate_mode = pool_gate_mode
         self.info_fuse_mode = info_fuse_mode
+        self.init_scale_mean = init_scale_mean
+        self.init_concentration = init_concentration
         self.contrastive_weight = contrastive_weight
         self.contrastive_temperature = contrastive_temperature
         self.contrastive_margin = contrastive_margin
@@ -166,7 +136,6 @@ class SmolAllocatorConfig(PretrainedConfig):
 
     def get(self, key, default=None):
         return getattr(self, key, default)
-
 
 
 __all__ = ["SmolAllocatorConfig"]

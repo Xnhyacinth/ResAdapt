@@ -93,7 +93,6 @@ class RegressionHeadAllocatorSmol(ModuleUtilsMixin, nn.Module):
                 logistic_normal_init_sigma=getattr(vision_config, "logistic_normal_init_sigma", 0.7),
                 categorical_temperature=getattr(vision_config, "categorical_temperature", 1.0),
                 pool_gate_mode=getattr(vision_config, "pool_gate_mode", "no_ln"),
-                info_fuse_mode=getattr(vision_config, "info_fuse_mode", "pooled_ln"),
                 sim_scale_weight=getattr(vision_config, "sim_scale_weight", 0.1),
                 sim_tau=getattr(vision_config, "sim_tau", 0.5),
                 sim_temp=getattr(vision_config, "sim_temp", 0.1),
@@ -101,7 +100,7 @@ class RegressionHeadAllocatorSmol(ModuleUtilsMixin, nn.Module):
                 init_scale_mean=getattr(vision_config, "init_scale_mean", 1.0),
                 init_concentration=getattr(vision_config, "init_concentration", 4.0),
             )
-        elif allocator_arch in {"framewise_v3", "framewise_active_v1", "framewise"}:
+        elif allocator_arch in {"framewise_v3", "framewise_v4", "framewise_active_v1", "framewise"}:
             self.scorer = FrameWiseScaleAllocator(
                 dim=output_dim,
                 depth=getattr(vision_config, "self_depth", 2),
@@ -118,21 +117,23 @@ class RegressionHeadAllocatorSmol(ModuleUtilsMixin, nn.Module):
                 gate_temperature=getattr(vision_config, "gate_temperature", 1.0),
                 gate_query_scale=getattr(vision_config, "gate_query_scale", 1.0),
                 regression_head_mode=getattr(vision_config, "regression_head_mode", "mlp"),
-                beta_param_scale=getattr(vision_config, "beta_param_scale", 1.0),
+                beta_param_scale=getattr(vision_config, "beta_param_scale", 0.5),
                 beta_add_one=getattr(vision_config, "beta_add_one", True),
                 beta_init_mode=getattr(vision_config, "beta_init_mode", "uniform"),
                 continuous_dist=getattr(vision_config, "continuous_dist", "beta"),
                 continuous_eval_quantile=getattr(vision_config, "continuous_eval_quantile", 0.5),
                 logistic_normal_init_sigma=getattr(vision_config, "logistic_normal_init_sigma", 0.7),
                 categorical_temperature=getattr(vision_config, "categorical_temperature", 1.0),
-                pool_gate_mode=getattr(vision_config, "pool_gate_mode", "no_ln"),
-                info_fuse_mode=getattr(vision_config, "info_fuse_mode", "pooled_ln"),
-                sim_scale_weight=getattr(vision_config, "sim_scale_weight", 0.1),
+                pool_gate_mode=getattr(vision_config, "pool_gate_mode", "patch_ln"),
+                sim_scale_weight=getattr(vision_config, "sim_scale_weight", 0.15),
                 sim_tau=getattr(vision_config, "sim_tau", 0.5),
                 sim_temp=getattr(vision_config, "sim_temp", 0.1),
                 sim_gamma=getattr(vision_config, "sim_gamma", 0.05),
                 init_scale_mean=getattr(vision_config, "init_scale_mean", 1.0),
-                init_concentration=getattr(vision_config, "init_concentration", 4.0),
+                init_concentration=getattr(vision_config, "init_concentration", 5.0),
+                per_frame_concentration=bool(getattr(vision_config, "per_frame_concentration", True)),
+                frame_refine_depth=int(getattr(vision_config, "frame_refine_depth", 2)),
+                use_text_frame_cross_attn=bool(getattr(vision_config, "use_text_frame_cross_attn", True)),
             )
         else:
             raise ValueError(f"Unsupported allocator_arch: {allocator_arch}")
@@ -212,9 +213,12 @@ class RegressionHeadAllocatorSmol(ModuleUtilsMixin, nn.Module):
         return {}
 
     def get_contrastive_loss(self):
-        if hasattr(self.scorer, "get_contrastive_loss") and callable(self.scorer.get_contrastive_loss):
-            return self.scorer.get_contrastive_loss()
-        return torch.tensor(0.0, device=self.scorer.last_scales.device) if self.scorer.last_scales is not None else None
+        getter = getattr(self.scorer, "get_contrastive_loss", None)
+        if callable(getter):
+            return getter()
+        dev = next(self.scorer.parameters()).device
+        dt = next(self.scorer.parameters()).dtype
+        return torch.zeros((), device=dev, dtype=dt)
 
     def get_weighted_contrastive_loss(self):
         return self.get_contrastive_loss()

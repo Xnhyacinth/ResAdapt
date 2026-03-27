@@ -283,6 +283,10 @@ def _parse_intervals(s: str):
 
 
 def _compute_acc_reward(output_ans: str, gt_ans: str, gt, question_type: str) -> float:
+    """
+    Compute accuracy reward based on question type.
+    Handles various question types like multiple choice, numerical, math, etc.
+    """
     question_type = _normalize_text(str(question_type).replace("-", " ").replace("_", " "))
     if not question_type:
         try:
@@ -369,6 +373,11 @@ def _compute_acc_reward(output_ans: str, gt_ans: str, gt, question_type: str) ->
 
 
 def compute_score(*args, **kwargs) -> dict:
+    """
+    Main entry point for computing reward scores.
+    Extracts answers from model output and compares with ground truth.
+    Returns a dictionary containing final score, accuracy reward, and format reward.
+    """
     kwargs.pop("data_source", None)
     solution_str = kwargs.pop("solution_str", None)
     ground_truth = kwargs.pop("ground_truth", None)
