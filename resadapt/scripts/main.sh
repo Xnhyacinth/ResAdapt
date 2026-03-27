@@ -391,7 +391,12 @@ exp_name=$(echo "$exp_name" | sed \
     -e 's/nframes/nf/g' \
     -e 's/video_mrope/vidm/g' \
     -e 's/fsdp2/dp2/g' \
-    -e 's/ray/r/g')
+    -e 's/ray/r/g' \
+    -e 's/allocator/allo/g' \
+    -e 's/cost//g' \
+    -e 's/Qwen2.5-VL-/Q25-/g' \
+    -e 's/Qwen2-VL-/Q2-/g' \
+    -e 's/Qwen3-VL-/Q3-/g')
 
 # ==============================================================================
 # 7. Execution Command Construction
