@@ -29,12 +29,15 @@ class SmolAllocatorForConditionalGeneration(PreTrainedModel):
         super().__init__(config)
         self.config = config
         model_name = getattr(config, "smol_model_name", "HuggingFaceTB/SmolVLM2-256M-Video-Instruct")
-        self.processor = AutoProcessor.from_pretrained(model_name)
+        try:
+            self.processor = AutoProcessor.from_pretrained(model_name, use_fast=False)
+        except TypeError:
+            self.processor = AutoProcessor.from_pretrained(model_name)
 
         if hasattr(self.processor, "video_processor") and self.processor.video_processor is not None:
             self.processor.video_processor.num_frames = int(getattr(config, "max_frames", 16))
             self.processor.video_processor.fps = int(getattr(config, "fps", 2.0))
-            # HF may pick torchcodec when importable but FFmpeg/ABI is broken at runtime; try PyAV etc.
+            # Wrap fetch_videos: try torchcodec first, then PyAV / torchvision / opencv / decord on failure.
             patch_video_processor_fetch_videos(self.processor.video_processor)
         if hasattr(self.processor, "image_processor") and self.processor.image_processor is not None:
             self.processor.image_processor.do_image_splitting = False
@@ -537,7 +540,7 @@ if __name__ == "__main__":
         sim_tau=0.55,
         sim_temp=0.12,
         sim_gamma=0.05,
-        torch_dtype="bfloat16" if torch.cuda.is_available() else None,
+        dtype="bfloat16" if torch.cuda.is_available() else None,
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = SmolAllocatorForConditionalGeneration(config).to(device)

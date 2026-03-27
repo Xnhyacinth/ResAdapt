@@ -29,7 +29,10 @@ class SmolAllocatorForConditionalGeneration(PreTrainedModel):
         super().__init__(config)
         self.config = config
         model_name = getattr(config, "smol_model_name", "HuggingFaceTB/SmolVLM2-256M-Video-Instruct")
-        self.processor = AutoProcessor.from_pretrained(model_name)
+        try:
+            self.processor = AutoProcessor.from_pretrained(model_name, use_fast=False)
+        except TypeError:
+            self.processor = AutoProcessor.from_pretrained(model_name)
 
         if hasattr(self.processor, "video_processor") and self.processor.video_processor is not None:
             self.processor.video_processor.num_frames = int(getattr(config, "max_frames", 16))

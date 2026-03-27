@@ -634,7 +634,11 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
                 batch_first=True,
                 norm_first=True,
             )
-            self.frame_refine = nn.TransformerEncoder(enc_layer, num_layers=int(self.frame_refine_depth))
+            self.frame_refine = nn.TransformerEncoder(
+                enc_layer,
+                num_layers=int(self.frame_refine_depth),
+                enable_nested_tensor=False,
+            )
         else:
             self.frame_refine = None
 

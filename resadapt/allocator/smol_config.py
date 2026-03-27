@@ -91,6 +91,8 @@ class SmolAllocatorConfig(PretrainedConfig):
         self.vocab_size = vocab_size
         self.patch_size = patch_size
         self.torch_dtype = torch_dtype if torch_dtype is not None else dtype
+        # Hugging Face deprecates config key ``torch_dtype`` in favor of ``dtype`` (same value).
+        self.dtype = self.torch_dtype
         self._attn_implementation = _attn_implementation
         self.spatial_merge_size = spatial_merge_size
         self.hidden_size = hidden_size

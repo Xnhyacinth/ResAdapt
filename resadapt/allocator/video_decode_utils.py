@@ -3,14 +3,14 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 
-"""Video decode fallback when Hugging Face defaults to a broken ``torchcodec``.
+"""Video decode with backend retries around ``transformers.video_utils.load_video``.
 
-``transformers`` may set ``backend="torchcodec"`` in ``VideoProcessor.fetch_videos`` whenever
-``torchcodec`` is importable, but loading can still fail at runtime (missing ``libavutil``,
-FFmpeg mismatch, or ``torchcodec`` built against a different PyTorch ABI).
+Default order prefers **torchcodec** first (HF’s native path when available), then falls back on
+failure: PyAV → torchvision → opencv → decord. Use this when ``torchcodec`` is importable but
+sometimes fails at runtime (FFmpeg/ABI), or when you want a consistent retry policy.
 
-Set ``ALLOCATOR_VIDEO_BACKEND=pyav`` (or ``torchvision``, ``opencv``, ``decord``) to force a
-single backend. Otherwise we try, in order: PyAV → torchvision → opencv → decord → torchcodec.
+Set ``ALLOCATOR_VIDEO_BACKEND=pyav`` (or ``torchvision``, ``opencv``, ``decord``, ``torchcodec``)
+to **force** a single backend (no retries).
 """
 
 from __future__ import annotations
@@ -24,8 +24,8 @@ def _video_backend_order() -> list[str]:
     env = os.getenv("ALLOCATOR_VIDEO_BACKEND", "").strip().lower()
     if env:
         return [env]
-    # PyAV is usually available via ``pip install av``; torchcodec last.
-    return ["pyav", "torchvision", "opencv", "decord", "torchcodec"]
+    # Prefer torchcodec when it works; on any error try other backends.
+    return ["torchcodec", "pyav", "torchvision", "opencv", "decord"]
 
 
 def patch_video_processor_fetch_videos(video_processor: Any) -> None:

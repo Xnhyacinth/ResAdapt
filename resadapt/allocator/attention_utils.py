@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import os
+import warnings
 from typing import Any, Optional
 
 import numpy as np
@@ -170,13 +171,38 @@ def sdpa_scaled_dot_product_attention(
         return _call()
 
     try:
+        from torch.nn.attention import SDPBackend
+        from torch.nn.attention import sdpa_kernel
+
+        backends = [
+            SDPBackend.FLASH_ATTENTION,
+            SDPBackend.EFFICIENT_ATTENTION,
+            SDPBackend.MATH,
+        ]
+        if hasattr(SDPBackend, "CUDNN_ATTENTION"):
+            backends.append(SDPBackend.CUDNN_ATTENTION)
+        with sdpa_kernel(backends=backends):
+            return _call()
+    except ImportError:
+        pass
+    except (RuntimeError, ValueError, TypeError):
+        return _call()
+
+    try:
         from torch.backends.cuda import sdp_kernel
     except ImportError:
         return _call()
 
+    # Legacy API; PyTorch emits FutureWarning — prefer ``torch.nn.attention.sdpa_kernel`` (above).
     try:
-        with sdp_kernel(enable_flash=True, enable_mem_efficient=True, enable_math=True):
-            return _call()
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r".*sdp_kernel\(\) is deprecated.*",
+                category=FutureWarning,
+            )
+            with sdp_kernel(enable_flash=True, enable_mem_efficient=True, enable_math=True):
+                return _call()
     except (RuntimeError, ValueError, TypeError):
         return _call()
 
