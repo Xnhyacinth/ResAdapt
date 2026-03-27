@@ -6,6 +6,11 @@ from torch.nn.utils.rnn import pad_sequence
 from transformers import AutoProcessor, AutoModelForImageTextToText, PreTrainedModel
 from concurrent.futures import ThreadPoolExecutor
 
+from resadapt.allocator.attention_utils import (
+    forward_hf_text_model_safe,
+    resolve_pretrained_attn_implementation,
+    torch_dtype_for_hf_pretrained,
+)
 from resadapt.allocator.smol_config import SmolAllocatorConfig
 from resadapt.allocator.aznet_smol_v2 import RegressionHeadAllocatorSmol
 
@@ -39,8 +44,10 @@ class SmolAllocatorForConditionalGeneration(PreTrainedModel):
         self.tokenizer = getattr(self.processor, "tokenizer", None)
         self.smol_model = AutoModelForImageTextToText.from_pretrained(
             model_name,
-            dtype=getattr(config, "dtype", "auto"),
-            _attn_implementation=getattr(config, "_attn_implementation", "flash_attention_2"),
+            torch_dtype=torch_dtype_for_hf_pretrained(config),
+            _attn_implementation=resolve_pretrained_attn_implementation(
+                getattr(config, "_attn_implementation", None),
+            ),
         )
         self.allocator = RegressionHeadAllocatorSmol(config)
 
@@ -72,13 +79,12 @@ class SmolAllocatorForConditionalGeneration(PreTrainedModel):
         if text_model is None:
             emb = self.smol_model.get_input_embeddings()
             return emb(input_ids)
-        outputs = text_model(
+        return forward_hf_text_model_safe(
+            text_model,
             input_ids=input_ids,
             attention_mask=attention_mask,
-            output_hidden_states=False,
-            return_dict=True,
+            smol_parent=self.smol_model,
         )
-        return outputs.last_hidden_state if hasattr(outputs, "last_hidden_state") else outputs[0]
 
     def _encode_vision(self, pixel_values):
         vision_model = self._resolve_vision_model()
@@ -607,7 +613,7 @@ if __name__ == "__main__":
         llm_hidden_size=768,
         out_hidden_size=576,
         output_dim=1024,
-        self_depth=1,
+        self_depth=2,
         cross_depth=1,
         dim_head=64,
         num_heads=16,
@@ -620,7 +626,7 @@ if __name__ == "__main__":
         use_differentiable_importance=False,
         dropout=0.0,
         ff_mult=4,
-        beta_add_one=False,
+        beta_add_one=True,
         beta_param_scale=0.5,
         beta_init_mode="uniform",
         gate_temperature=1.0,
@@ -629,11 +635,11 @@ if __name__ == "__main__":
         continuous_eval_quantile=0.5,
         logistic_normal_init_sigma=0.7,
         categorical_temperature=1.0,
-        pool_gate_mode="no_ln",
+        pool_gate_mode="patch_ln",
         info_fuse_mode="pooled_ln",
-        sim_scale_weight=0.0,
-        sim_tau=0.6,
-        sim_temp=0.15,
+        sim_scale_weight=0.15,
+        sim_tau=0.55,
+        sim_temp=0.12,
         sim_gamma=0.05,
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

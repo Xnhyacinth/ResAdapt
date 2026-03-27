@@ -36,14 +36,14 @@ The training process involves three main steps:
 
 ### 1. Save the Allocator
 
-Before starting the RL training, you need to initialize and save the allocator weights. Run the modeling script corresponding to your allocator version. For example, using the `smol_v2` allocator:
+Before starting the RL training, you need to initialize and save the allocator weights. We recommend using the `smol_v3` allocator which features an optimized configuration (e.g., cross-attention, contrastive learning).
 
 ```bash
 cd resadapt/allocator
-python3 modeling_allocator_smol_v2.py
+python3 modeling_allocator_smol_v3.py
 ```
 
-This will save the initialized allocator model to your configured path (e.g., `YOUR_WORKSPACE_PATH/models/allocator_smolv2`).
+This will save the initialized allocator model to your configured path (e.g., `YOUR_WORKSPACE_PATH/models/allocator_smol_init`).
 You can adjust the configuration in `smol_config.py` if necessary.
 
 ### 2. Configure the Main Script
@@ -54,7 +54,7 @@ Ensure that `ALLOCATOR_PATH` matches the directory where you saved the model in 
 For example:
 
 ```bash
-ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocator_smolv2
+ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocator_smol_init
 ```
 
 ### 3. Run Training
@@ -64,7 +64,7 @@ Use `run.sh` to configure the training parameters and launch the job. The `run.s
 Example execution from the repository root:
 
 ```bash
-# Example: 7B model with smol_v2 allocator, FSDP2, 4 nodes
+# Example: 7B model with smol_v3 allocator, FSDP2, 4 nodes
 NNODES=4 nohup bash resadapt/scripts/main.sh Qwen/Qwen2.5-VL-7B-Instruct scale > logs_run/train_7b.log 2>&1 &
 ```
 
