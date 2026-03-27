@@ -2519,8 +2519,9 @@ class AllocatorWorker(Worker, DistProfilerExtension):
                 
                 # `use_cost` is passed from ray_trainer.py via data.meta_info to ensure it reflects 
                 # any dynamic switches applied during advantage computation. Fallback to self.config.
-                use_cost_value = str(data.meta_info.get("use_cost", self.config.get("use_cost", ""))).lower()
-                
+                _uc = data.meta_info.get("use_cost", self.config.get("use_cost", ""))
+                use_cost_value = str(_uc if _uc is not None else "").lower()
+
                 # Determine if we need to compute frame metrics based on the cost function configuration.
                 # This aligns with the requirements in advantage computation.
                 needs_frame_metrics = use_cost_implies_compute_frame_metrics(use_cost_value)
@@ -2614,9 +2615,10 @@ class AllocatorWorker(Worker, DistProfilerExtension):
         scale_multi_modal_data = str(self.config.get("scale_multi_modal_data", "")).lower()
         
         # Extract use_cost dynamically passed from ray_trainer.py to align with the current algorithm state.
-        use_cost_value = str(data.meta_info.get("use_cost", self.config.get("use_cost", ""))).lower()
+        _uc = data.meta_info.get("use_cost", self.config.get("use_cost", ""))
+        use_cost_value = str(_uc if _uc is not None else "").lower()
         needs_frame_metrics = use_cost_implies_compute_frame_metrics(use_cost_value)
-        
+
         # Set compute_frame_metrics flag for downstream logic if needed by scale data or cost function.
         if (scale_multi_modal_data and "aw" in scale_multi_modal_data) or needs_frame_metrics:
             data.meta_info["compute_frame_metrics"] = True

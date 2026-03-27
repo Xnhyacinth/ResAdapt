@@ -171,6 +171,7 @@ SCALE_ENABLE_ALLOCATOR_FROZEN=${SCALE_ENABLE_ALLOCATOR_FROZEN:-"1"} # Freeze act
 # Cost / allocator advantage (algorithm.use_cost; script appends "_acc")
 # capo (default): cost-aware mix — group z-score on acc, optional HADW, correct/wrong vs
 #   normalized mean scale + gas tax; optional frame terms if frame_metrics exist (see advantage.py).
+# capo_frame: same as capo but allocator computes frame_metrics (use_cost_frame_metrics + fsdp_workers).
 # Other SCALE_USE_COST: gdpo | mygdpo | piecewise_v1 | piecewise_v2 | saliency_share_v1 (…).
 # piecewise_* defaults live in piecewise_adaptive_cost.py + advantage.py; optional overrides e.g. gas(0.03), noframeaux.
 SCALE_ENABLE_COST=${SCALE_ENABLE_COST:-"1"}

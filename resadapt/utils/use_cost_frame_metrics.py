@@ -6,9 +6,15 @@
 """Gate ``compute_frame_metrics`` in allocator workers from ``algorithm.use_cost``.
 
 Must stay aligned with ``resadapt.reward_fn.advantage.compute_allocator_advantage``:
-any branch that reads ``frame_metrics`` (``capo``, ``saliency_share_v1``, ``framepair_v1``,
-piecewise frame-aux for ``piecewise_v2`` / ``piecewise_v1``+``frameaux``, etc.) should
-return True here so ``verl_patches.fsdp_workers`` sets ``meta_info[\"compute_frame_metrics\"]``.
+only tags whose advantage path **requires** ``frame_metrics`` return True here.
+``capo`` is scalar-only by default. To **compute** ``frame_metrics`` for the optional
+capo frame bonus (``framecoef``, ``wkeep``, …), either:
+
+- set ``use_cost`` to include ``capo_frame`` (e.g. ``capo_frame_acc`` via
+  ``SCALE_USE_COST=capo_frame`` in ``main.sh``), or
+- add substring ``aw`` to ``scale_multi_modal_data`` (existing OR gate in workers).
+
+Other tags that need frames: ``saliency_share_v1``, ``framepair_v1``, …
 
 The ``scale_multi_modal_data`` substring ``aw`` is handled separately in the worker
 (OR with this predicate): when ``aw`` is present, frame-aware paths always compute metrics.
@@ -21,13 +27,13 @@ from __future__ import annotations
 
 from typing import Optional
 
-# Substrings that appear in ``use_cost`` tags whose advantage path may consume
-# ``frame_metrics`` (see advantage.py: per_sid_frame_adv_all, piecewise frameaux).
+# Substrings in ``use_cost`` whose advantage path may consume ``frame_metrics``.
+# Bare ``capo`` is not listed (scalar-first); ``capo_frame`` opts into allocator
+# ``compute_frame_metrics`` for the capo optional frame bonus block in advantage.py.
 _USE_COST_FRAME_METRIC_TOKENS = (
+    "capo_frame",
     "saliency_share_v1",
     "framepair_v1",
-    "newtie",
-    "capo",
     "frame_rank",
     "frame_ideal",
     "frameaware",

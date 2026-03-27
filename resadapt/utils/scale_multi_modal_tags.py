@@ -15,7 +15,7 @@ feature toggles, optional ``ray<NNODES>-`` prefix, and passed identically to
 - ``filter``: ``algorithm.use_filter_sid``; also gates predictor log-prob alignment when combined with ``ispred``.
 - ``ccen``: concentration / scale regularization coefficients (allocator ``scale.concentration_coef``).
 - ``sim``: contrastive + sim-scale losses (allocator overrides).
-- ``cost<name>``: cost / advantage mode stem from ``SCALE_USE_COST`` (e.g. ``costcapo``); Hydra sets ``algorithm.use_cost=<name>_acc``.
+- ``cost<name>``: cost / advantage mode stem from ``SCALE_USE_COST`` (e.g. ``costcapo``, ``costcapo_frame``); Hydra sets ``algorithm.use_cost=<name>_acc``.
 - ``notest``: skip validation (``test_freq``, ``val_before_train``).
 - ``actor_frozen``: freeze full actor (``fsdp_workers`` actor role; vision + LM).
 - ``allocator_frozen``: freeze allocator weights where applicable (worker config).
