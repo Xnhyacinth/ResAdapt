@@ -648,7 +648,8 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
                 dropout=dropout,
                 batch_first=True,
             )
-            self.text_frame_cross_attn_gate = nn.Parameter(torch.tensor(0.25))
+            # 1D (numel=1): FSDP rejects 0-d scalar parameters.
+            self.text_frame_cross_attn_gate = nn.Parameter(torch.tensor([0.25]))
         else:
             self.text_frame_cross_attn = None
             self.text_frame_cross_attn_gate = None
