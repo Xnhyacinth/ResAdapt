@@ -349,7 +349,8 @@ class TaskRunner:
         trust_remote_code = config.data.get("trust_remote_code", False)
         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
         # Used for multimodal LLM, could be None
-        processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
+        # use_fast=False: fast image proc warns/falls back (LANCZOS→BICUBIC) on torch tensors; matches allocator loads.
+        processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=False)
 
         resource_pool_manager = self.init_resource_pool_mgr(config)
 

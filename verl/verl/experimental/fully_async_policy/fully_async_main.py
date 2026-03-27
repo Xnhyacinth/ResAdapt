@@ -162,7 +162,7 @@ class FullyAsyncTaskRunner:
         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
 
         # Used for multimodal LLM, could be None
-        processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
+        processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=False)
 
         self.components["tokenizer"] = tokenizer
         self.components["processor"] = processor

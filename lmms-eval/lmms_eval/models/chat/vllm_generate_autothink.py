@@ -153,7 +153,7 @@ from resadapt.utils.utils import (
     video2images,
 )
 
-if env_true("VLLM_MROPE_PATCH"):
+if env_true("RESADAPT_MROPE_PATCH") or env_true("VLLM_MROPE_PATCH"):
     print("🚀 [Patching] Applying custom VLLM Qwen2.5-VL MROPE logic...")
     import vllm
     from vllm.model_executor.models import qwen2_5_vl
@@ -972,7 +972,7 @@ class VLLMGenerateAutoThink(VLLMChat):
                 messages, packed_videos = video2list(
                     messages,
                     packed_videos,
-                    env_true("VLLM_MROPE_PATCH"),
+                    env_true("RESADAPT_MROPE_PATCH") or env_true("VLLM_MROPE_PATCH"),
                     self.processor.video_processor.temporal_patch_size,
                 )
         scales = scale_entry.get("scales", None)

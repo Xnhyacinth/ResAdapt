@@ -40,7 +40,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.multiprocessing.reductions import reduce_tensor
 
 ###
-if os.environ.get("VLLM_MROPE_PATCH", False):
+if os.environ.get("RESADAPT_MROPE_PATCH") or os.environ.get("VLLM_MROPE_PATCH"):
     print("🚀 [Patching] Applying custom VLLM Qwen2.5-VL MROPE logic...")
     import vllm
     from vllm.model_executor.models import qwen2_5_vl
