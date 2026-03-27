@@ -116,7 +116,7 @@ if [[ -z "${IP}" ]] && command -v python3 >/dev/null 2>&1; then
 fi
 IP=${IP:-127.0.0.1}
 
-export RAY_ADDRESS="http://${IP}:8888"
+# export RAY_ADDRESS="http://${IP}:8888"
 WORKING_DIR=${WORKING_DIR:-"${PWD}"}
 RUNTIME_ENV=${RUNTIME_ENV:-"${WORKING_DIR}/verl/verl/trainer/runtime_env.yaml"}
 NNODES=${NNODES:-1}
