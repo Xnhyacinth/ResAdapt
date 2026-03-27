@@ -1087,10 +1087,13 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
             beta = beta.clamp(min=0.1, max=200.0)
             alpha32 = alpha.float()
             beta32 = beta.float()
-            # Beta.icdf is NotImplemented in PyTorch; use betainc bisection (see attention_utils).
-            action_0_1 = beta_regularized_icdf(
-                alpha32, beta32, float(self.continuous_eval_quantile)
-            )
+            # q=0.5: use mean (matches aznet_v1/v2). Otherwise quantile via betainc bisection — PyTorch Beta.icdf is missing.
+            if self.continuous_eval_quantile != 0.5:
+                action_0_1 = beta_regularized_icdf(
+                    alpha32, beta32, float(self.continuous_eval_quantile)
+                )
+            else:
+                action_0_1 = alpha32 / (alpha32 + beta32)
         else:
             params_fp32 = params.float()
             mu32 = params_fp32[..., 0]
