@@ -96,7 +96,10 @@ class RegressionHeadAllocatorSmol(ModuleUtilsMixin, nn.Module):
     ):
         if text_features is not None:
             if int(text_features.shape[-1]) == self.out_hidden_size:
-                text_out = self.mlp(text_features)
+                if isinstance(self.mlp, nn.Identity):
+                    text_out = text_features
+                else:
+                    text_out = self.mlp(text_features.to(dtype=self.mlp.weight.dtype))
             elif int(text_features.shape[-1]) == self.output_dim:
                 text_out = text_features
             else:
@@ -127,7 +130,10 @@ class RegressionHeadAllocatorSmol(ModuleUtilsMixin, nn.Module):
                     text_mask = text_mask.repeat_interleave(repeats, dim=0)
 
         visual_batch = pad_sequence(visual_features, batch_first=True)
-        visual_batch_proj = self.vlp(visual_batch)
+        if isinstance(self.vlp, nn.Identity):
+            visual_batch_proj = self.vlp(visual_batch)
+        else:
+            visual_batch_proj = self.vlp(visual_batch.to(dtype=self.vlp.weight.dtype))
 
         return self.scorer(
             visual_features_batch=visual_batch_proj,

@@ -5,15 +5,26 @@
 
 """Shared attention helpers: HuggingFace backbone dtype/attn resolution, SDPA fallbacks.
 
-Some CUDA + PyTorch SDPA paths raise ``RuntimeError: CUBLAS_STATUS_INVALID_VALUE`` inside
-``scaled_dot_product_attention``. Mitigations:
+Some CUDA stacks (e.g. PyTorch 2.10+cu128) raise ``CUBLAS_STATUS_INVALID_VALUE`` in:
+
+- ``scaled_dot_product_attention`` (SDPA), or
+- ``F.linear`` / ``cublasGemmEx`` on **BF16** weights (eager attention does not fix this).
+
+Mitigations:
 
 - Prefer ``flash_attention_2`` when ``flash_attn`` is installed (SmolVLM / Llama text tower).
-- If flash is unavailable, default to ``eager`` for HF backbones (stable; slower than SDPA).
+- If flash is unavailable, default to ``eager`` for HF backbones (avoids brittle SDPA).
+- On persistent cuBLAS errors, the text tower forward can run with **float32 weights** briefly
+  (see ``ALLOCATOR_TEXT_ENCODE_FP32``) or automatic fallback in ``forward_hf_text_model_safe``.
 - For custom ``F.scaled_dot_product_attention`` call sites (aznet / importance), retry with
   math-only SDPA kernels, then re-raise.
 
-Override with env ``ALLOCATOR_ATTN_IMPLEMENTATION`` = ``flash_attention_2`` | ``sdpa`` | ``eager``.
+Env:
+
+- ``ALLOCATOR_ATTN_IMPLEMENTATION`` — unset: **prefer** ``flash_attention_2`` if ``flash_attn`` is
+  installed (overrides saved config ``sdpa`` / ``eager``). Set to ``sdpa`` or ``eager`` to force.
+- ``ALLOCATOR_TEXT_ENCODE_FP32`` = ``1`` — always run the HF text tower forward in FP32 weights
+  (slower; avoids BF16 cuBLAS GEMM issues).
 """
 
 from __future__ import annotations
@@ -23,6 +34,11 @@ from typing import Any, Optional
 
 import torch
 import torch.nn.functional as F
+
+
+def _env_truthy(name: str) -> bool:
+    v = os.getenv(name, "").strip().lower()
+    return v in ("1", "true", "yes", "y", "on", "t")
 
 
 def _hf_set_attn_implementation(module: Any, value: str = "eager") -> bool:
@@ -81,28 +97,67 @@ def resolve_pretrained_attn_implementation(
 ) -> str:
     """Resolve HuggingFace ``_attn_implementation`` for SmolVLM / transformer backbones.
 
-    If ``flash_attention_2`` is requested but ``flash_attn`` is not importable:
+    **Priority:** use FlashAttention-2 whenever ``flash_attn`` is importable, unless the environment
+    explicitly forces ``sdpa`` or ``eager`` (``ALLOCATOR_ATTN_IMPLEMENTATION``). This overrides a
+    saved config that still says ``sdpa`` / ``eager``.
 
-    - When ``prefer_flash`` is True (default), return ``eager`` to avoid brittle SDPA/cuBLAS on some drivers.
-    - Otherwise return ``sdpa`` for speed (may crash on bad stacks; set env to ``eager`` if needed).
+    If ``flash_attn`` is not installed and the resolved choice was flash, fall back to ``eager``
+    when ``prefer_flash`` is True (avoids brittle SDPA/cuBLAS on some drivers), else ``sdpa``.
     """
     env = os.getenv("ALLOCATOR_ATTN_IMPLEMENTATION", "").strip()
-    if env:
-        attn = env
-    a = (attn or "flash_attention_2").lower().replace("-", "_")
-    if a in ("flash_attention_2", "flash_attn"):
+    a_env = env.lower().replace("-", "_") if env else ""
+
+    # Only these env values bypass the flash-first policy.
+    if a_env == "eager":
+        return "eager"
+    if a_env in ("sdpa", "sdp"):
+        return "sdpa"
+
+    if prefer_flash:
         try:
             import flash_attn  # noqa: F401
 
             return "flash_attention_2"
         except ImportError:
-            return "eager" if prefer_flash else "sdpa"
+            pass
+
+    attn = env if env else attn
+    a = (attn or "flash_attention_2").lower().replace("-", "_")
+    if a in ("flash_attention_2", "flash_attn"):
+        return "eager" if prefer_flash else "sdpa"
     if a in ("sdpa", "sdp"):
         return "sdpa"
     if a == "eager":
         return "eager"
-    # Unknown / legacy strings: prefer stable eager over SDPA (can hit cuBLAS on some stacks).
     return "eager"
+
+
+def _forward_text_model_fp32_weights(
+    text_model: Any,
+    *,
+    input_ids: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+) -> Any:
+    """Run text tower with FP32 weights; avoids BF16 ``cublasGemmEx`` failures on some drivers."""
+    p = next(text_model.parameters(), None)
+    if p is None or p.dtype in (torch.float32, torch.float64):
+        return text_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=False,
+            return_dict=True,
+        )
+    orig_dtype = p.dtype
+    text_model.to(dtype=torch.float32)
+    try:
+        return text_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=False,
+            return_dict=True,
+        )
+    finally:
+        text_model.to(dtype=orig_dtype)
 
 
 def forward_hf_text_model_safe(
@@ -112,7 +167,7 @@ def forward_hf_text_model_safe(
     attention_mask: Optional[torch.Tensor],
     smol_parent: Optional[Any] = None,
 ) -> torch.Tensor:
-    """Run Llama/text tower forward with SDPA/cuBLAS fallbacks and optional eager downgrade."""
+    """Run Llama/text tower forward with SDPA/cuBLAS fallbacks, eager, then FP32 weights if needed."""
 
     def _call() -> Any:
         return text_model(
@@ -122,16 +177,25 @@ def forward_hf_text_model_safe(
             return_dict=True,
         )
 
-    def _is_cuda_attn_runtime_error(e: BaseException) -> bool:
+    def _is_cuda_blas_runtime_error(e: BaseException) -> bool:
         err = str(e).lower()
         return "cuda" in err or "cublas" in err
+
+    if _env_truthy("ALLOCATOR_TEXT_ENCODE_FP32"):
+        outputs = _forward_text_model_fp32_weights(
+            text_model,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+        )
+        hs = outputs.last_hidden_state if hasattr(outputs, "last_hidden_state") else outputs[0]
+        return hs
 
     try:
         outputs = _call()
     except RuntimeError as e:
-        if not _is_cuda_attn_runtime_error(e):
+        if not _is_cuda_blas_runtime_error(e):
             raise
-        # Prefer switching HF to eager first; math-only SDPA can still hit cuBLAS batched GEMM.
+        # Eager attention: fixes brittle SDPA; does not fix BF16 ``cublasGemmEx`` in ``F.linear``.
         if smol_parent is not None:
             _hf_force_eager_attention_stack(smol_parent, text_model)
         else:
@@ -139,11 +203,19 @@ def forward_hf_text_model_safe(
         try:
             outputs = _call()
         except RuntimeError as e2:
-            if not _is_cuda_attn_runtime_error(e2):
+            if not _is_cuda_blas_runtime_error(e2):
                 raise
-            from torch.backends.cuda import sdp_kernel
-
             try:
+                outputs = _forward_text_model_fp32_weights(
+                    text_model,
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                )
+            except RuntimeError as e3:
+                if not _is_cuda_blas_runtime_error(e3):
+                    raise
+                from torch.backends.cuda import sdp_kernel
+
                 with sdp_kernel(
                     enable_flash=False,
                     enable_mem_efficient=False,
@@ -151,10 +223,6 @@ def forward_hf_text_model_safe(
                     enable_cudnn=False,
                 ):
                     outputs = _call()
-            except RuntimeError:
-                if smol_parent is not None:
-                    _hf_force_eager_attention_stack(smol_parent, text_model)
-                outputs = _call()
     hs = outputs.last_hidden_state if hasattr(outputs, "last_hidden_state") else outputs[0]
     return hs
 
