@@ -26,7 +26,7 @@ export MODEL_VERSION="YOUR_MODEL_VERSION"
 #            ./eval.sh ... method0 0 0 0 0 0 0 0 logs 0 0 0 chunk_topk32_chunk_bychunk_chunk_noresize
 
 unset ALLOCATOR_PATH ENABLE_BASELINE_SCALE BASELINE_SCALE_FACTOR USE_DEBUG MICRO_BATCH WORKERS max_inflight_per_gpu
-unset CONVERT2IMAGES REMOVEPAD VLLM_MROPE_PATCH VIDEO2LIST VIDEO2IMAGE ADD_SYS
+unset CONVERT2IMAGES REMOVEPAD RESADAPT_MROPE_PATCH VLLM_MROPE_PATCH VIDEO2LIST VIDEO2IMAGE ADD_SYS
 cp -r YOUR_WORKSPACE_PATH/longvu/lmms-eval/lmms_eval YOUR_WORKSPACE_PATH/ResAdapt/lmms-eval
 
 model=${1:-"liuhaotian/llava-v1.5-7b"}
@@ -330,7 +330,7 @@ elif [[ "$conv_template" == *"vllm"* ]]; then
     if [[ "$task_type" == *"video"* ]]; then
         if [[ ( "$model" =~ mrope|vidm && "$method" != *"nopred"* ) || "$method" =~ mrope ]]; then
             echo "Using mrope patch"
-            export VLLM_MROPE_PATCH=True
+            export RESADAPT_MROPE_PATCH=True
         fi
 
         if [ "$max_num_frames" -ge 128 ]; then

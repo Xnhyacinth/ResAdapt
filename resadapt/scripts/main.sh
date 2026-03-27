@@ -303,8 +303,10 @@ extra_args+=( "data.max_frames=${NFRAMES}" )
 extra_args+=( "+actor_rollout_ref.rollout.engine_kwargs.vllm.mm_processor_cache_gb=16" )
 extra_args+=( "+actor_rollout_ref.rollout.max_model_len=32000" )
 
-export VLLM_MROPE_PATCH=True
-ray_env_args+=( "+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_MROPE_PATCH='${VLLM_MROPE_PATCH}'" )
+# Qwen2.5-VL MROPE monkey-patch (verl rollout). Use RESADAPT_MROPE_PATCH — not VLLM_* — so vLLM's
+# env validator does not warn about unknown official variables (see vllm/envs.py).
+export RESADAPT_MROPE_PATCH=${RESADAPT_MROPE_PATCH:-True}
+ray_env_args+=( "+ray_kwargs.ray_init.runtime_env.env_vars.RESADAPT_MROPE_PATCH='${RESADAPT_MROPE_PATCH}'" )
 
 # ==============================================================================
 # 6. Scale Features Assembly

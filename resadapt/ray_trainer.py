@@ -2185,7 +2185,7 @@ class RayPPOTrainer:
                         # update actor (skip if actor is frozen based on scale_multi_modal_data config)
                         scale_multi_modal_data = _resolve_scale_multi_modal_tag(self.config).lower()
                         if scale_multi_modal_data and "actor_frozen" in scale_multi_modal_data:
-                            if self.rank == 0:
+                            if getattr(self, "rank", 0) == 0:
                                 print("[trainer] Skipping actor update (actor is frozen).")
                         else:
                             with marked_timer("update_actor", timing_raw, color="red"):
