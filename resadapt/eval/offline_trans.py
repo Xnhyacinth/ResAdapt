@@ -794,14 +794,14 @@ def main():
     try:
         model = model_cls.from_pretrained(
             args.model,
-            torch_dtype="auto",
+            dtype="auto",
             device_map="auto",
             attn_implementation="flash_attention_2",
         )
     except Exception:
         model = model_cls.from_pretrained(
             args.model,
-            torch_dtype="auto",
+            dtype="auto",
             device_map="auto",
         )
     model.eval()

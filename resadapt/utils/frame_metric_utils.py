@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping
 
+import numpy as np
 import torch
 
 FRAME_METRICS_PREFIX = "frame_metrics:"
@@ -47,21 +48,77 @@ def decode_frame_metrics(batch_tensors: Mapping[str, object] | None) -> dict[str
     }
 
 
+def align_frame_metrics_to_batch(
+    *,
+    original_sids: np.ndarray,
+    updated_sids: np.ndarray,
+    updated_frame_metrics: dict[str, torch.Tensor],
+    fill_value: float = 0.0,
+) -> dict[str, torch.Tensor]:
+    """Broadcast per-sample frame metrics from a filtered allocator batch back to the full batch order.
+
+    Rows whose ``sid`` was not in the filtered update (allocator skipped) are filled with
+    ``fill_value`` (default 0), analogous to keeping neutral values when aligning log-probs.
+
+    Args:
+        original_sids: Sequence IDs for the **full** training batch (e.g. ``batch_size`` prompts).
+        updated_sids: Sequence IDs for rows that actually ran through the allocator (filtered).
+        updated_frame_metrics: Metric tensors with batch dimension ``len(updated_sids)``.
+        fill_value: Fill for samples with no allocator update.
+
+    Returns:
+        Metric tensors with batch dimension ``len(original_sids)``.
+    """
+    if not updated_frame_metrics:
+        return {}
+    n_u = len(updated_sids)
+    sid_to_idx = {sid: idx for idx, sid in enumerate(updated_sids.tolist())}
+    out: dict[str, torch.Tensor] = {}
+    for key, tensor in updated_frame_metrics.items():
+        if tensor.shape[0] != n_u:
+            raise ValueError(
+                f"frame metric {key!r} leading dim {tensor.shape[0]} != len(updated_sids)={n_u}"
+            )
+        device = tensor.device
+        dtype = tensor.dtype
+        tail = tensor.shape[1:]
+        rows: list[torch.Tensor] = []
+        for sid in original_sids.tolist():
+            j = sid_to_idx.get(sid)
+            if j is not None:
+                rows.append(tensor[j].clone())
+            else:
+                rows.append(torch.full(tail, fill_value, dtype=dtype, device=device))
+        out[key] = torch.stack(rows, dim=0)
+    return out
+
+
 def sync_frame_metrics(
     target_batch: MutableMapping[str, object] | None,
     source_batch_tensors: Mapping[str, object] | None,
+    *,
+    original_sids: np.ndarray | None = None,
+    filtered_sids: np.ndarray | None = None,
 ) -> dict[str, torch.Tensor]:
     """
     Synchronizes frame metrics from a source batch to a target batch.
-    
-    Args:
-        target_batch (MutableMapping[str, object] | None): The batch dictionary to update.
-        source_batch_tensors (Mapping[str, object] | None): The source batch dictionary containing encoded frame metrics.
-        
-    Returns:
-        dict[str, torch.Tensor]: The decoded frame metrics dictionary.
+
+    When ``use_filter_sid`` + ``scale_n > 1``, the allocator runs on a **filtered** subset; metric
+    tensors are then shorter than ``target_batch``. Pass ``original_sids`` (full batch) and
+    ``filtered_sids`` (allocator batch) so metrics are expanded by ``sid`` to match ``target_batch``.
     """
     frame_metrics = decode_frame_metrics(source_batch_tensors)
+    if (
+        frame_metrics
+        and original_sids is not None
+        and filtered_sids is not None
+        and len(original_sids) != len(filtered_sids)
+    ):
+        frame_metrics = align_frame_metrics_to_batch(
+            original_sids=original_sids,
+            updated_sids=filtered_sids,
+            updated_frame_metrics=frame_metrics,
+        )
     if target_batch is not None:
         if frame_metrics:
             target_batch["frame_metrics"] = frame_metrics

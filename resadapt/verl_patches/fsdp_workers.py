@@ -481,7 +481,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             actor_module = actor_module_class.from_pretrained(
                 pretrained_model_name_or_path=local_path,
-                torch_dtype=torch_dtype,
+                dtype=torch_dtype,
                 config=actor_model_config,
                 trust_remote_code=trust_remote_code,
                 attn_implementation=attn_implementation,
@@ -751,19 +751,27 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         )
         log_gpu_memory_usage(f"After building {self.config.rollout.name} rollout", logger=logger)
 
-        # Full params
-        if torch.distributed.get_world_size() == 1 and fsdp_version(self.actor_module_fsdp) == 1:
-            FSDP.set_state_dict_type(
-                self.actor_module_fsdp,
-                state_dict_type=StateDictType.FULL_STATE_DICT,
-                state_dict_config=FullStateDictConfig(),
+        # Full params (FSDP1). PyTorch deprecates FSDP.set_state_dict_type in favor of
+        # torch.distributed.checkpoint.state_dict.get_state_dict; rollout still uses .state_dict()
+        # downstream — full migration is larger; suppress the known FutureWarning here.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r".*FSDP\.(state_dict_type|set_state_dict_type).*(deprecated|being deprecated).*",
+                category=FutureWarning,
             )
-        elif fsdp_version(self.actor_module_fsdp) == 1:
-            FSDP.set_state_dict_type(
-                self.actor_module_fsdp,
-                state_dict_type=StateDictType.SHARDED_STATE_DICT,
-                state_dict_config=ShardedStateDictConfig(),
-            )
+            if torch.distributed.get_world_size() == 1 and fsdp_version(self.actor_module_fsdp) == 1:
+                FSDP.set_state_dict_type(
+                    self.actor_module_fsdp,
+                    state_dict_type=StateDictType.FULL_STATE_DICT,
+                    state_dict_config=FullStateDictConfig(),
+                )
+            elif fsdp_version(self.actor_module_fsdp) == 1:
+                FSDP.set_state_dict_type(
+                    self.actor_module_fsdp,
+                    state_dict_type=StateDictType.SHARDED_STATE_DICT,
+                    state_dict_config=ShardedStateDictConfig(),
+                )
 
         # used for LoRA
         self.base_sync_done: bool = "dummy" not in self.config.rollout.load_format
@@ -2108,7 +2116,7 @@ class AllocatorWorker(Worker, DistProfilerExtension):
 
             actor_module = actor_module_class.from_pretrained(
                 pretrained_model_name_or_path=local_path,
-                torch_dtype=torch_dtype,
+                dtype=torch_dtype,
                 config=actor_model_config,
                 trust_remote_code=trust_remote_code,
                 attn_implementation=attn_implementation,

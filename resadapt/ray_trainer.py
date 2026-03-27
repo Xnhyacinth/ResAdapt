@@ -1809,7 +1809,16 @@ class RayPPOTrainer:
             else:
                 batch.batch['allocator_log_probs'] = allocator_output.batch['allocator_log_probs']
 
-        sync_frame_metrics(batch.batch, allocator_output.batch)
+        need_frame_metrics_align = (
+            self.config.algorithm.get("use_filter_sid", False)
+            and self.config.allocator.get("scale_n", 1) > 1
+        )
+        sync_frame_metrics(
+            batch.batch,
+            allocator_output.batch,
+            original_sids=batch.non_tensor_batch["sid"] if need_frame_metrics_align else None,
+            filtered_sids=batch_scaled.non_tensor_batch["sid"] if need_frame_metrics_align else None,
+        )
 
         return batch
     ###

@@ -60,6 +60,9 @@ usage() {
     echo "  --debug 0/1               Debug mode flag (0 for off, 1 for on) (default: ${DEBUG})"
     echo "  -h, --help                Show this help message"
     echo ""
+    echo "Environment (logging):"
+    echo "  USE_WANDB=0               Disable Weights & Biases; only console logs (default: 1, wandb enabled)"
+    echo ""
     echo "Environment (cost / advantage):"
     echo "  SCALE_ENABLE_COST=0|1     (default: ${SCALE_ENABLE_COST})"
     echo "  SCALE_USE_COST            Short tag, e.g. capo, piecewise_v2, saliency_share_v1 (default: ${SCALE_USE_COST})"
@@ -195,7 +198,7 @@ else
     SCALE_MULTI_MODAL_DATA="${scale_core_norm}"
 fi
 
-project_name='GeneralQA_Qwen_Verify'
+project_name='VideoQA_Qwen_Verify'
 
 # ==============================================================================
 # 5. Training Hyperparameters
@@ -282,7 +285,14 @@ NFRAMES=${NFRAMES:-"8"}                     # Number of frames for video inputs
 ppo_micro_batch_size_per_gpu=1              # Micro batch size for PPO per GPU
 min_scale=0.2                               # Minimum scale factor
 
-# WandB Logging Configuration
+# WandB Logging Configuration (set USE_WANDB=0 to skip wandb entirely — console only)
+USE_WANDB=${USE_WANDB:-"1"}
+if [[ "${USE_WANDB}" == "0" ]]; then
+    TRAINER_LOGGER_HYDRA="['console']"
+else
+    TRAINER_LOGGER_HYDRA="['console','wandb']"
+fi
+
 WANDB_RUN_ID=${WANDB_RUN_ID:-"0"}
 if [[ "$WANDB_RUN_ID" != "0" ]]; then
     extra_args+=( "+trainer.wandb_run_id=${WANDB_RUN_ID}" )
@@ -491,7 +501,7 @@ cmd=(
     +reward_model.reward_kwargs.max_resp_len="${max_response_length}"
     custom_reward_function.path="${PROJECT_ROOT}/resadapt/reward_fn/reward_r1.py"
     custom_reward_function.name="compute_score"
-    trainer.logger="['console','wandb']"
+    trainer.logger="${TRAINER_LOGGER_HYDRA}"
     trainer.project_name="${project_name}"
     trainer.experiment_name="${exp_name}"
     trainer.n_gpus_per_node=8
