@@ -19,9 +19,8 @@ class SmolAllocatorConfig(PretrainedConfig):
         ``torch_dtype`` (e.g. ``"bfloat16"`` on Ampere+) is passed to
         ``AutoModelForImageTextToText.from_pretrained(torch_dtype=...)``.
         ``_attn_implementation`` is resolved by ``resadapt.allocator.attention_utils``:
-        **prefer** ``flash_attention_2`` whenever ``flash_attn`` is installed (overrides saved
-        ``sdpa`` / ``eager`` in config). Otherwise default to ``eager`` for stability. Force
-        ``sdpa`` or ``eager`` with env ``ALLOCATOR_ATTN_IMPLEMENTATION``.
+        **prefer** ``flash_attention_2`` when ``flash_attn`` is installed; otherwise ``sdpa``.
+        Override with env ``ALLOCATOR_ATTN_IMPLEMENTATION`` (``flash_attention_2``, ``sdpa``, ``eager``).
     """
 
     model_type = "smol_allocator"

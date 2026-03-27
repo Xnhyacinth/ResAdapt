@@ -1,5 +1,4 @@
 import os
-import time
 import torch
 from torch.nn.utils.rnn import pad_sequence
 from transformers import AutoProcessor, AutoModelForImageTextToText, PreTrainedModel
@@ -32,10 +31,6 @@ class SmolAllocatorForConditionalGeneration(PreTrainedModel):
         model_name = getattr(config, "smol_model_name", "HuggingFaceTB/SmolVLM2-256M-Video-Instruct")
         self.processor = AutoProcessor.from_pretrained(model_name)
 
-        print(f"set allocator min_scale: {config.min_scale}")
-        print(f"set allocator max_scale: {config.max_scale}")
-        print(f"set allocator max_frames: {config.max_frames}")
-
         if hasattr(self.processor, "video_processor") and self.processor.video_processor is not None:
             self.processor.video_processor.num_frames = int(getattr(config, "max_frames", 16))
             self.processor.video_processor.fps = int(getattr(config, "fps", 2.0))
@@ -52,9 +47,6 @@ class SmolAllocatorForConditionalGeneration(PreTrainedModel):
             ),
         )
         self.allocator = RegressionHeadAllocatorSmol(config)
-
-    def _timing_enabled(self) -> bool:
-        return str(os.getenv("ALLOCATOR_TIMING", "0")).lower() in ("1", "true", "yes", "y", "t", "on")
 
     def _resolve_text_model(self):
         for attr in ["text_model", "language_model", "model"]:
@@ -316,8 +308,6 @@ class SmolAllocatorForConditionalGeneration(PreTrainedModel):
 
         # Handle messages preprocessing
         if messages is not None:
-            if self._timing_enabled():
-                _t_msg0 = time.perf_counter()
             if isinstance(messages, list) and messages and isinstance(messages[0], dict):
                 messages = [messages]
             
@@ -359,18 +349,8 @@ class SmolAllocatorForConditionalGeneration(PreTrainedModel):
                 text_attention_mask = text_inputs["attention_mask"].to(self.device)
             else:
                 text_input_ids = text_attention_mask = None
-            if self._timing_enabled():
-                _t_msg1 = time.perf_counter()
-                print(
-                    f"[allocator_timing] messages_preprocess_s={( _t_msg1 - _t_msg0 ):.4f} "
-                    f"samples={len(messages) if isinstance(messages, list) else 0}",
-                    flush=True,
-                )
         else:
             text_input_ids = text_attention_mask = None
-
-        if self._timing_enabled():
-            _t_total0 = time.perf_counter()
 
         # Encode text
         text_features = None
@@ -378,23 +358,11 @@ class SmolAllocatorForConditionalGeneration(PreTrainedModel):
         if getattr(self.config, "use_text", True):
             if text_input_ids is not None:
                 text_mask = text_attention_mask.bool()
-                if self._timing_enabled():
-                    _t0 = time.perf_counter()
-                    text_features = self._encode_text(text_input_ids, text_attention_mask)
-                    _t1 = time.perf_counter()
-                    print(f"[allocator_timing] encode_text_s={( _t1 - _t0 ):.4f}", flush=True)
-                else:
-                    text_features = self._encode_text(text_input_ids, text_attention_mask)
+                text_features = self._encode_text(text_input_ids, text_attention_mask)
             elif input_ids is not None:
                 attention_mask = attention_mask if attention_mask is not None else torch.ones_like(input_ids, dtype=torch.long)
                 text_mask = attention_mask.bool()
-                if self._timing_enabled():
-                    _t0 = time.perf_counter()
-                    text_features = self._encode_text(input_ids, attention_mask)
-                    _t1 = time.perf_counter()
-                    print(f"[allocator_timing] encode_text_s={( _t1 - _t0 ):.4f}", flush=True)
-                else:
-                    text_features = self._encode_text(input_ids, attention_mask)
+                text_features = self._encode_text(input_ids, attention_mask)
 
         # Encode vision
         visual_features, visual_grids, visual_per_sample = [], [], []
@@ -402,23 +370,11 @@ class SmolAllocatorForConditionalGeneration(PreTrainedModel):
         if sample_count > 0 and pixel_values is not None:
             pixel_values = self._ensure_pixel_values_5d(pixel_values)
             pixel_attention_mask = self._ensure_pixel_attention_mask_4d(pixel_attention_mask)
-            if self._timing_enabled():
-                _t0 = time.perf_counter()
-                image_hidden_states = self._get_image_features(pixel_values, pixel_attention_mask)
-                _t1 = time.perf_counter()
-                print(f"[allocator_timing] get_image_features_s={( _t1 - _t0 ):.4f}", flush=True)
-            else:
-                image_hidden_states = self._get_image_features(pixel_values, pixel_attention_mask)
+            image_hidden_states = self._get_image_features(pixel_values, pixel_attention_mask)
 
             if image_hidden_states is None:
                 flat = pixel_values.view(-1, *pixel_values.shape[2:])
-                if self._timing_enabled():
-                    _t0 = time.perf_counter()
-                    image_hidden_states = self._encode_vision(flat)
-                    _t1 = time.perf_counter()
-                    print(f"[allocator_timing] encode_vision_s={( _t1 - _t0 ):.4f}", flush=True)
-                else:
-                    image_hidden_states = self._encode_vision(flat)
+                image_hidden_states = self._encode_vision(flat)
             if image_hidden_states is not None:
                 real_mask = self._real_image_mask(pixel_values)
                 patch_size = getattr(self.config, "patch_size", None)
@@ -466,45 +422,17 @@ class SmolAllocatorForConditionalGeneration(PreTrainedModel):
             }
         
         visual_grid_thw = torch.stack(visual_grids, dim=0).to(self.device)
-        if self._timing_enabled():
-            _t0 = time.perf_counter()
-            new_actions, scales, log_probs, new_scale_mask = self.allocator(
-                visual_features=visual_features,
-                visual_grid_thw=visual_grid_thw,
-                text_features=text_features,
-                text_mask=text_mask,
-                actions=actions,
-                visual_per_sample=visual_per_sample,
-                eval_mode=eval_mode,
-                scale_mask=scale_mask,
-                compute_frame_metrics=compute_frame_metrics_param,
-            )
-            _t1 = time.perf_counter()
-            print(
-                f"[allocator_timing] allocator_head_s={( _t1 - _t0 ):.4f} "
-                f"samples={sample_count} visual_items={int(visual_grid_thw.shape[0])}",
-                flush=True,
-            )
-        else:
-            new_actions, scales, log_probs, new_scale_mask = self.allocator(
-                visual_features=visual_features,
-                visual_grid_thw=visual_grid_thw,
-                text_features=text_features,
-                text_mask=text_mask,
-                actions=actions,
-                visual_per_sample=visual_per_sample,
-                eval_mode=eval_mode,
-                scale_mask=scale_mask,
-                compute_frame_metrics=compute_frame_metrics_param,
-            )
-
-        if self._timing_enabled():
-            _t_total1 = time.perf_counter()
-            print(
-                f"[allocator_timing] encode_plus_allocator_total_s={( _t_total1 - _t_total0 ):.4f} "
-                f"samples={sample_count}",
-                flush=True,
-            )
+        new_actions, scales, log_probs, new_scale_mask = self.allocator(
+            visual_features=visual_features,
+            visual_grid_thw=visual_grid_thw,
+            text_features=text_features,
+            text_mask=text_mask,
+            actions=actions,
+            visual_per_sample=visual_per_sample,
+            eval_mode=eval_mode,
+            scale_mask=scale_mask,
+            compute_frame_metrics=compute_frame_metrics_param,
+        )
 
         frame_metrics = self.allocator.get_frame_metrics() if compute_frame_metrics_param else {}
 
@@ -619,11 +547,8 @@ if __name__ == "__main__":
     #     trust_remote_code=True,
     # )
 
-    total, trainable = count_params(model)
+    count_params(model)
 
-    print(f"Total params: {total/1e9:.3f} B")
-    print(f"Trainable params: {trainable/1e9:.3f} B")
-    
     from PIL import Image
     image = Image.open("YOUR_WORKSPACE_PATH/VisionThink/scissor.png")
     image1 = Image.open("YOUR_WORKSPACE_PATH/vlm_datasets/LLaVA-Pretrain/images/00000/000000010.jpg")
@@ -665,6 +590,4 @@ if __name__ == "__main__":
                 json.dump(new_config, f, indent=2)
     out = model.scale_multi_modal(messages=messages, return_mm_data=False, eval_mode=True)
     out_text = model.scale_multi_modal(messages=messages_text, return_mm_data=False, eval_mode=True)
-    print({k: (v.shape if torch.is_tensor(v) else v) for k, v in out.items()})
-    print({k: (v.shape if torch.is_tensor(v) else v) for k, v in out_text.items()})
-    print("demo ok")
+    _ = (out, out_text)

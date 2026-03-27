@@ -3,7 +3,10 @@ import math
 import torch
 import torch.nn.functional as F
 
-from resadapt.allocator.attention_utils import sdpa_scaled_dot_product_attention as sdpa_attn
+from resadapt.allocator.attention_utils import (
+    flash_attn_varlen_qkv_dtype,
+    sdpa_scaled_dot_product_attention as sdpa_attn,
+)
 from torch import nn
 from einops import rearrange, repeat
 from torch.distributions import Beta, Categorical, Normal, TransformedDistribution
@@ -76,13 +79,6 @@ def _apply_rotary_pos_emb_packed(t: torch.Tensor, pos: torch.Tensor) -> torch.Te
     t_rot = (t_rot * cos) + (rotate_half(t_rot) * sin)
     return torch.cat((t_rot, t_pass), dim=-1)
 
-def _flash_attn_cast_dtype(x: torch.Tensor) -> torch.Tensor:
-    if x.dtype in (torch.float16, torch.bfloat16):
-        return x
-    if x.is_cuda and hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported():
-        return x.to(torch.bfloat16)
-    return x.to(torch.float16)
-
 def _build_pos_ids_from_cu_seqlens(cu_seqlens: torch.Tensor) -> torch.Tensor:
     if cu_seqlens.numel() <= 1:
         return torch.empty((0,), dtype=torch.long, device=cu_seqlens.device)
@@ -143,9 +139,9 @@ class PatchWiseTemporalAttention(nn.Module):
             qkv_unpad, indices, cu_seqlens, max_seqlen = unpad_ret[:4]
             qkv_unpad = rearrange(qkv_unpad, "nnz (three h d) -> three nnz h d", three=3, h=self.num_heads)
             q, k, v = qkv_unpad[0], qkv_unpad[1], qkv_unpad[2]
-            q = _flash_attn_cast_dtype(q)
-            k = _flash_attn_cast_dtype(k)
-            v = _flash_attn_cast_dtype(v)
+            q = flash_attn_varlen_qkv_dtype(q)
+            k = flash_attn_varlen_qkv_dtype(k)
+            v = flash_attn_varlen_qkv_dtype(v)
 
             if exists(rotary_pos_emb):
                 if rotary_pos_emb.ndim == 4:
@@ -243,9 +239,9 @@ class SpatialAttention(nn.Module):
             qkv_unpad, indices, cu_seqlens, max_seqlen = unpad_ret[:4]
             qkv_unpad = rearrange(qkv_unpad, "nnz (three h d) -> three nnz h d", three=3, h=self.num_heads)
             q, k, v = qkv_unpad[0], qkv_unpad[1], qkv_unpad[2]
-            q = _flash_attn_cast_dtype(q)
-            k = _flash_attn_cast_dtype(k)
-            v = _flash_attn_cast_dtype(v)
+            q = flash_attn_varlen_qkv_dtype(q)
+            k = flash_attn_varlen_qkv_dtype(k)
+            v = flash_attn_varlen_qkv_dtype(v)
 
             if exists(rotary_pos_emb):
                 if rotary_pos_emb.ndim == 4:
@@ -670,8 +666,6 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
         )
         self.variance_head = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, 1))
 
-        # Enable optional debug checks to catch NaN/Inf during development
-        self.debug_checks = False
         self._last_frame_metrics = None  # Frame metrics dict for advantage computation
         self._last_scale_var = None
         self._last_concentration_loss = None
@@ -1099,9 +1093,6 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
                 1e-4, 1.0 - 1e-4
             )
             action_0_1 = dist0.icdf(q)
-            # print(f"Beta dist deterministic: {action_0_1}")
-            # print("alpha:", alpha)
-            # print("beta:", beta)
         else:
             params_fp32 = params.float()
             mu32 = params_fp32[..., 0]
@@ -1166,13 +1157,7 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
             output_dim = 2
         head_outputs_obj = torch.zeros((B, max_t_obj, output_dim), dtype=visual_features_batch.dtype, device=device)
         frame_features_obj = torch.zeros((B, max_t_obj, D), dtype=visual_features_batch.dtype, device=device)
-        gate_entropy_sum = 0.0
-        gate_entropy_count = 0
-        feat_norm_var_sum = 0.0
-        feat_norm_var_count = 0
-        frame_sim_sum = 0.0
-        frame_sim_count = 0
-        
+
         metric_buffers = {} if compute_frame_metrics else None
 
         temporal_valid = torch.arange(max_t_obj, device=device)[None, :] < object_t_dims[:, None]
@@ -1188,7 +1173,7 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
             text_mask_i = text_mask[obj_idx : obj_idx + 1] if exists(text_mask) else None
             valid_mask_i = temporal_valid[obj_idx : obj_idx + 1, :t]
 
-            pooled, detail_score, gate_entropy = self._pool_frame_tokens(patch_states, text_states_i, text_mask_i)
+            pooled, detail_score, _ = self._pool_frame_tokens(patch_states, text_states_i, text_mask_i)
             frame_states = self._mix_frame_tokens(pooled, valid_mask_i)
             frame_states = self._refine_frame_states(frame_states, valid_mask_i)
             if self.text_frame_cross_attn is not None and text_states_i is not None:
@@ -1220,16 +1205,6 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
 
             head_outputs_obj[obj_idx, :t] = head_outputs[0]
             frame_features_obj[obj_idx, :t] = frame_states[0]
-
-            gate_entropy_sum += gate_entropy.mean().item()
-            gate_entropy_count += 1
-            feat_norm = frame_states.float().norm(dim=-1)
-            feat_norm_var_sum += feat_norm.var(dim=1, unbiased=False).mean().item()
-            feat_norm_var_count += 1
-            if t > 1:
-                frame_sim = F.cosine_similarity(frame_states[:, :-1], frame_states[:, 1:], dim=-1)
-                frame_sim_sum += frame_sim.mean().item()
-                frame_sim_count += 1
 
             if compute_frame_metrics:
                 for metric_name, metric_values in signal_metrics.items():
@@ -1290,21 +1265,15 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
         if not self.use_discrete_action:
             invalid_actions_obj = ~torch.isfinite(raw_actions_obj)
             if invalid_actions_obj.any():
-                invalid_count = int(invalid_actions_obj.sum().item())
-                print(f"[allocator] non-finite actions detected: {invalid_count}")
                 raw_actions_obj = raw_actions_obj.masked_fill(invalid_actions_obj, 0.4)
 
         invalid_scales_obj = ~torch.isfinite(scales_obj)
         if invalid_scales_obj.any():
-            invalid_count = int(invalid_scales_obj.sum().item())
-            print(f"[allocator] non-finite scales detected: {invalid_count}")
             scales_obj = scales_obj.masked_fill(invalid_scales_obj, 1.0)
 
         if log_probs_obj is not None:
             invalid_log_probs_obj = ~torch.isfinite(log_probs_obj)
             if invalid_log_probs_obj.any():
-                invalid_count = int(invalid_log_probs_obj.sum().item())
-                print(f"[allocator] non-finite log_probs detected: {invalid_count}")
                 log_probs_obj = log_probs_obj.masked_fill(invalid_log_probs_obj, 0.0)
                 
         # Compute sim_scale_loss: leverage redundancy to compress scales
@@ -1403,31 +1372,12 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
         if raw_actions is not None:
             invalid_actions = ~torch.isfinite(raw_actions)
             if invalid_actions.any():
-                bad_samples = torch.nonzero(invalid_actions.any(dim=1), as_tuple=False).flatten().tolist()
-                print(f"[allocator] non-finite actions in samples: {bad_samples}")
                 raw_actions = raw_actions.masked_fill(invalid_actions, 0.0)
 
         if scales is not None:
             invalid_scales = ~torch.isfinite(scales)
             if invalid_scales.any():
-                bad_samples = torch.nonzero(invalid_scales.any(dim=1), as_tuple=False).flatten().tolist()
-                print(f"[allocator] non-finite scales in samples: {bad_samples}")
                 scales = scales.masked_fill(invalid_scales, 1.0)
-
-        if eval_mode:
-            mask = scale_mask_out.float()
-            denom = mask.sum(dim=1, keepdim=True).clamp_min(1.0)
-            mean = (scales * mask).sum(dim=1, keepdim=True) / denom
-            var = ((scales - mean) ** 2 * mask).sum(dim=1, keepdim=True) / denom
-            scale_var_mean = var.mean().item()
-            gate_entropy_mean = gate_entropy_sum / max(1, gate_entropy_count)
-            feat_norm_var_mean = feat_norm_var_sum / max(1, feat_norm_var_count)
-            frame_sim_mean = frame_sim_sum / max(1, frame_sim_count)
-            print(
-                f"[allocator-debug] gate_entropy_mean={gate_entropy_mean:.6f} "
-                f"feat_norm_var_mean={feat_norm_var_mean:.6f} frame_sim_mean={frame_sim_mean:.6f} "
-                f"scale_var_mean={scale_var_mean:.6f}"
-            )
 
         return raw_actions, scales, log_probs, scale_mask_out
 
@@ -1702,51 +1652,6 @@ class RegressionHeadAllocator(ModuleUtilsMixin, nn.Module):
         # Project: (B, Max_Seq_Len, OutDim)
         # Running one big Linear layer is much faster than loop
         visual_batch_proj = self.vlp(visual_batch)
-
-        if eval_mode:
-            object_t_dims = visual_grid_thw[:, 0].to(torch.long)
-            object_l_dims = ((visual_grid_thw[:, 1] * visual_grid_thw[:, 2]) // (self.spatial_merge_size ** 2)).to(torch.long)
-            pre_sim_sum = 0.0
-            pre_sim_count = 0
-            pre_var_sum = 0.0
-            pre_var_count = 0
-            post_sim_sum = 0.0
-            post_sim_count = 0
-            post_var_sum = 0.0
-            post_var_count = 0
-            for i in range(int(object_t_dims.shape[0])):
-                t = int(object_t_dims[i].item())
-                l = int(object_l_dims[i].item())
-                if t <= 0 or l <= 0:
-                    continue
-                pre = visual_batch[i, : t * l].reshape(t, l, -1)
-                pre_mean = pre.mean(dim=1)
-                if t > 1:
-                    pre_sim = F.cosine_similarity(pre_mean[:-1], pre_mean[1:], dim=-1)
-                    pre_sim_sum += pre_sim.mean().item()
-                    pre_sim_count += 1
-                pre_norm = pre_mean.float().norm(dim=-1)
-                pre_var_sum += pre_norm.var(unbiased=False).item()
-                pre_var_count += 1
-
-                post = visual_batch_proj[i, : t * l].reshape(t, l, -1)
-                post_mean = post.mean(dim=1)
-                if t > 1:
-                    post_sim = F.cosine_similarity(post_mean[:-1], post_mean[1:], dim=-1)
-                    post_sim_sum += post_sim.mean().item()
-                    post_sim_count += 1
-                post_norm = post_mean.float().norm(dim=-1)
-                post_var_sum += post_norm.var(unbiased=False).item()
-                post_var_count += 1
-
-            pre_sim_mean = pre_sim_sum / max(1, pre_sim_count)
-            post_sim_mean = post_sim_sum / max(1, post_sim_count)
-            pre_var_mean = pre_var_sum / max(1, pre_var_count)
-            post_var_mean = post_var_sum / max(1, post_var_count)
-            print(
-                f"[allocator-debug] vlp_pre_sim_mean={pre_sim_mean:.6f} vlp_pre_var_mean={pre_var_mean:.6f} "
-                f"vlp_post_sim_mean={post_sim_mean:.6f} vlp_post_var_mean={post_var_mean:.6f}"
-            )
 
         return self.scorer(
             visual_features_batch=visual_batch_proj,
@@ -2053,4 +1958,3 @@ if __name__ == "__main__":
     assert scale_mask is not None
     vm = scales[scale_mask]
     assert (vm >= model.min_scale).all() and (vm <= model.max_scale).all()
-    print("FrameWiseScaleAllocator smoke test OK:", scales.shape, "log_probs:", None if log_probs is None else log_probs.shape)

@@ -308,11 +308,6 @@ def get_mrope_input_positions00(
     llm_positions = np.concatenate(llm_pos_ids_list, axis=1).reshape(3, -1)
     mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
 
-    print("llm_positions[0]", llm_positions[0].tolist())
-    print("llm_positions[1]", llm_positions[1].tolist())
-    print("llm_positions[2]", llm_positions[2].tolist())
-    print("mrope_position_delta", mrope_position_delta)
-
     return torch.from_numpy(llm_positions), mrope_position_delta
 
 def get_mrope_input_positions(
@@ -516,11 +511,6 @@ def get_mrope_input_positions(
     llm_positions = np.concatenate(llm_pos_ids_list, axis=1).reshape(3, -1)
     mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
 
-    print("llm_positions[0]", llm_positions[0].tolist())
-    print("llm_positions[1]", llm_positions[1].tolist())
-    print("llm_positions[2]", llm_positions[2].tolist())
-    print("mrope_position_delta", mrope_position_delta)
-
     return torch.from_numpy(llm_positions), mrope_position_delta
 
 def expand_video_prompt_blocks(prompt, video_inputs, video_metadatas=None, ts_key="video_timestamps"):
@@ -650,7 +640,6 @@ if __name__ == "__main__":
                 video_metadata, temporal_patch_size
             )
 
-        print("PROMPT:", repr(prompt))
         prompt = expand_video_prompt_blocks(prompt, x_videos, video_metadata)
         # if isinstance(video_kwargs, dict) and "video_metadata" in video_kwargs:
         #     video_kwargs = dict(video_kwargs)
@@ -661,8 +650,6 @@ if __name__ == "__main__":
             video_inputs = new_videos
     # breakpoint()
     # prompt = expand_video_prompt(prompt, x_videos, 2)
-
-    print("PROMPT:", repr(prompt))  # ✅ 先检查里面是否有视觉占位符
 
     mm_data = {}
     if image_inputs is not None:
@@ -695,5 +682,4 @@ if __name__ == "__main__":
     )
 
     outputs = llm.generate([llm_inputs], sampling_params=sampling_params)
-    for o in outputs:
-        print(o.outputs[0].text)
+    _ = [o.outputs[0].text for o in outputs]

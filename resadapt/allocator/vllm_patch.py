@@ -408,10 +408,6 @@ def get_mrope_input_positions00(
 
     llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
     mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
-    print("llm_positions[0]", llm_positions[0].tolist())
-    print("llm_positions[1]", llm_positions[1].tolist())
-    print("llm_positions[2]", llm_positions[2].tolist())
-    print("mrope_position_delta", mrope_position_delta)
     return llm_positions, mrope_position_delta
 
 
@@ -451,10 +447,6 @@ def get_mrope_input_positions11(
 
     llm_positions = np.concatenate(llm_pos_ids_list, axis=1).reshape(3, -1)
     mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
-    print("llm_positions[0]", llm_positions[0].tolist())
-    print("llm_positions[1]", llm_positions[1].tolist())
-    print("llm_positions[2]", llm_positions[2].tolist())
-    print("mrope_position_delta", mrope_position_delta)
     return torch.from_numpy(llm_positions), mrope_position_delta
 
 def iter_mm_grid_thw22(
@@ -603,10 +595,6 @@ def get_mrope_input_positions22(
 
     llm_positions = np.concatenate(llm_pos_ids_list, axis=1).reshape(3, -1)
     mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
-    print("llm_positions[0]", llm_positions[0].tolist())
-    print("llm_positions[1]", llm_positions[1].tolist())
-    print("llm_positions[2]", llm_positions[2].tolist())
-    print("mrope_position_delta", mrope_position_delta)
     return torch.from_numpy(llm_positions), mrope_position_delta
 
 
@@ -793,8 +781,6 @@ if __name__ == "__main__":
     # video_inputs = [(video, metadata) for video, metadata in zip(new_videos, video_metadata)]
 
     # breakpoint()
-    print(video_inputs[0][0].shape)
-    print(prompt)
     # print(video_timestamps)
 
     # if os.environ.get("REMOVEPAD", None):
@@ -827,7 +813,6 @@ if __name__ == "__main__":
     video_timestamps_list = []
     
     temporal_merge_size = processor.video_processor.temporal_patch_size
-    print("processor.temporal_patch_size", processor.video_processor.temporal_patch_size)
     if video_inputs is not None:
         mm_data["video"] = video_inputs
 
@@ -853,9 +838,4 @@ if __name__ == "__main__":
     }
 
     outputs = llm.generate([llm_inputs], sampling_params=sampling_params)
-    generated_text = outputs[0].outputs[0].text
-
-    # outputs = llm.generate([llm_inputs], sampling_params=sampling_params)
-    # generated_text = outputs[0].outputs[0].text
-
-    print(generated_text)
+    _ = outputs[0].outputs[0].text  # demo output

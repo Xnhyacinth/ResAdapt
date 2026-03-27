@@ -17,14 +17,18 @@ By coupling a lightweight **Allocator** with an unchanged MLLM backbone, ResAdap
 To set up the environment, run the following commands:
 
 ```bash
+conda create -n resadapt python=3.12
+conda activate resadapt
 pip install -e ".[vllm]"
 pip install "transformers<5.0"
 pip install flash-attn --no-build-isolation
-pip install rouge_score sympy
-# For CUDA-enabled TorchCodec (replace cu124 with your CUDA version, e.g., cu118, cu121)
-conda install "ffmpeg"
+pip install rouge_score sympy num2words
+# For CUDA-enabled TorchCodec (replace cu128 with your CUDA version, e.g., cu118, cu121)
+conda install "ffmpeg" -c conda-forge
 pip install torchcodec --index-url=https://download.pytorch.org/whl/cu128
 ```
+
+> **Note**: For training with Qwen3-VL models, it is recommended to use PyTorch 2.10 and `vllm==0.18.0` for optimal compatibility.
 
 ## Quick Start
 

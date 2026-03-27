@@ -24,9 +24,6 @@ from transformers.modeling_utils import ModuleUtilsMixin
 from torch.nn.utils.rnn import pad_sequence
 import math
 
-# Flash attention support via SDPA (PyTorch 2.0+)
-_SDPA_AVAILABLE = hasattr(F, 'scaled_dot_product_attention')
-
 def exists(val):
     return val is not None
 
@@ -122,8 +119,6 @@ class CrossModalMatcher(nn.Module):
     def __init__(self, dim: int, num_heads: int = 4, dropout: float = 0.0):
         super().__init__()
         self.num_heads = num_heads
-        self.head_dim = dim // num_heads
-        self.scale = self.head_dim ** -0.5
         self.dropout_p = dropout
         
         self.norm_frame = nn.LayerNorm(dim)
@@ -165,46 +160,29 @@ class CrossModalMatcher(nn.Module):
         k = rearrange(k, 'b n (h d) -> b h n d', h=self.num_heads)
         v = rearrange(v, 'b n (h d) -> b h n d', h=self.num_heads)
         
-        # SDPA with flash attention support
-        if _SDPA_AVAILABLE:
-            # Convert mask for SDPA: (B, N) -> (B, 1, T, N) as float mask
-            # SDPA expects additive mask (0 = keep, -inf = mask)
-            # Optimized: avoid intermediate tensors by using log directly
-            attn_mask = None
-            if text_mask is not None:
-                if text_mask.dim() == 2:
-                    invalid_rows = text_mask.sum(dim=1) == 0
-                    if invalid_rows.any():
-                        text_mask = text_mask.clone()
-                        text_mask[invalid_rows, 0] = True
-                mask_bool = text_mask.unsqueeze(1).unsqueeze(2)
-                attn_mask = torch.where(
-                    mask_bool,
-                    q.new_zeros(1),
-                    q.new_full((1,), float("-inf"))
-                ).expand(B, 1, T, N)
-            
-            out = sdpa_attn(
-                q, k, v,
-                attn_mask=attn_mask,
-                dropout_p=self.dropout_p if self.training else 0.0,
-                is_causal=False,
-            )
-        else:
-            # Fallback to manual attention
-            attn = torch.matmul(q, k.transpose(-1, -2)) * self.scale
-            if text_mask is not None:
-                if text_mask.dim() == 2:
-                    invalid_rows = text_mask.sum(dim=1) == 0
-                    if invalid_rows.any():
-                        text_mask = text_mask.clone()
-                        text_mask[invalid_rows, 0] = True
-                mask = text_mask.unsqueeze(1).unsqueeze(2)  # (B, 1, 1, N)
-                attn = attn.masked_fill(~mask, float('-inf'))
-            attn_probs = F.softmax(attn, dim=-1)
-            if self.training and self.dropout_p > 0:
-                attn_probs = F.dropout(attn_probs, p=self.dropout_p)
-            out = torch.matmul(attn_probs, v)
+        # SDPA (CUDA prefers Flash/mem-efficient kernels via attention_utils.sdpa_scaled_dot_product_attention)
+        attn_mask = None
+        if text_mask is not None:
+            if text_mask.dim() == 2:
+                invalid_rows = text_mask.sum(dim=1) == 0
+                if invalid_rows.any():
+                    text_mask = text_mask.clone()
+                    text_mask[invalid_rows, 0] = True
+            mask_bool = text_mask.unsqueeze(1).unsqueeze(2)
+            attn_mask = torch.where(
+                mask_bool,
+                q.new_zeros(1),
+                q.new_full((1,), float("-inf")),
+            ).expand(B, 1, T, N)
+
+        out = sdpa_attn(
+            q,
+            k,
+            v,
+            attn_mask=attn_mask,
+            dropout_p=self.dropout_p if self.training else 0.0,
+            is_causal=False,
+        )
         
         out = rearrange(out, 'b h t d -> b t (h d)')
         
@@ -634,8 +612,7 @@ class DifferentiableImportanceAllocator(ModuleUtilsMixin, nn.Module):
         
         # ===== Query for gating (learnable or text-derived) =====
         self.gate_query_proj = nn.Linear(dim, dim)
-        
-        self.debug_checks = False
+
         self._last_contrastive_loss = None  # Tensor for gradient flow
         self._last_frame_metrics = None     # Frame metrics dict for advantage computation
         self._last_concentration_loss = None
@@ -885,10 +862,6 @@ class DifferentiableImportanceAllocator(ModuleUtilsMixin, nn.Module):
             text_relevance_obj = torch.zeros((B, max_t_obj), dtype=torch.float32, device=device)
             info_score_obj = torch.zeros((B, max_t_obj), dtype=torch.float32, device=device)
         
-        # Debug stats
-        gate_entropy_sum, frame_sim_sum = 0.0, 0.0
-        debug_count = 0
-        
         # Group by (T, L) for efficient processing
         # Optimized: use return_inverse to avoid repeated nonzero calls
         pair = torch.stack([object_t_dims, object_l_dims], dim=1)
@@ -995,17 +968,7 @@ class DifferentiableImportanceAllocator(ModuleUtilsMixin, nn.Module):
                     uniqueness_obj[idx, :t] = uniqueness_local.clamp(0, 1)
                     text_relevance_obj[idx, :t] = text_relevance_local.clamp(-1, 1)
                     info_score_obj[idx, :t] = info_score_local
-            
-            # Debug stats
-            if eval_mode:
-                gate_safe = torch.nan_to_num(gate, nan=0.0, posinf=0.0, neginf=0.0)
-                gate_ent = -(gate_safe.clamp(1e-9) * gate_safe.clamp(1e-9).log()).sum(dim=-1).mean()
-                gate_entropy_sum += gate_ent.item()
-                if t > 1:
-                    f_sim = F.cosine_similarity(frame_features[:, :-1], frame_features[:, 1:], dim=-1, eps=1e-6).mean()
-                    frame_sim_sum += f_sim.item()
-                debug_count += 1
-        
+
         # Store contrastive loss TENSOR for training (gradient flow)
         if compute_aux:
             if contrastive_count > 0:
@@ -1150,24 +1113,7 @@ class DifferentiableImportanceAllocator(ModuleUtilsMixin, nn.Module):
             return None, scales, log_probs, scale_mask_out
         
         raw_actions = self._restructure(raw_actions_obj, visual_grid_thw, scale_mask_out, pad_val, device)
-        
-        # Print debug info
-        if eval_mode and debug_count > 0:
-            mask = (scales != 0.0).float() # Simple mask proxy
-            denom = mask.sum(dim=1, keepdim=True).clamp_min(1.0)
-            mean = (scales * mask).sum(dim=1, keepdim=True) / denom
-            var = ((scales - mean) ** 2 * mask).sum(dim=1, keepdim=True) / denom
-            # Safe tensor-to-scalar conversion for print
-            c_loss_val = self._last_contrastive_loss.item() if isinstance(self._last_contrastive_loss, torch.Tensor) else self._last_contrastive_loss
-            def _fmt(v):
-                return f"{v:.4f}" if isinstance(v, (int, float)) else "N/A"
-            print(
-                f"[DIP-debug] gate_entropy={_fmt(gate_entropy_sum/debug_count)} "
-                f"frame_sim={_fmt(frame_sim_sum/debug_count)} "
-                f"scale_var={var.mean().item():.6f} "
-                f"contrastive_loss={_fmt(c_loss_val)}"
-            )
-        
+
         if isinstance(scales, torch.Tensor) and scales.dtype == torch.bfloat16:
             scales = scales.float()
         if isinstance(log_probs, torch.Tensor) and log_probs.dtype == torch.bfloat16:

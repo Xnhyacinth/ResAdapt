@@ -763,7 +763,6 @@ class FrameWiseScaleAllocatorLightV2(ModuleUtilsMixin, nn.Module):
             target = s[:, :-1] - self.sim_gamma * w
             err = F.relu(s[:, 1:] - target)
             self._last_sim_scale_loss = (err * w).sum() / (m.sum().clamp_min(1.0))
-            # print(f"[AZNetv4] sim_scale_loss={self._last_sim_scale_loss:.6f}")
         else:
             self._last_sim_scale_loss = None
         padded_actions_for_policy = padded_actions_in
@@ -819,13 +818,7 @@ class FrameWiseScaleAllocatorLightV2(ModuleUtilsMixin, nn.Module):
             }
         else:
             self._last_frame_metrics = None
-        if eval_mode:
-            valid_scales = scales_obj[temporal_valid]
-            scale_var = valid_scales.var(unbiased=False).item() if valid_scales.numel() > 0 else 0.0
-            sim_mean = (sim_sum / max(sim_count, 1)).item() if sim_sum is not None else 0.0
-            sim_pre_mean = (sim_pre_sum / max(sim_pre_count, 1)).item() if sim_pre_sum is not None else 0.0
-            # print(f"[scale_eval] var={scale_var:.6f} frame_sim={sim_mean:.6f} frame_sim_pre={sim_pre_mean:.6f}")
-        
+
         log_probs = self.restructure_sequence(log_probs_obj, visual_grid_thw, scale_mask_out, 0.0, device) if log_probs_obj is not None else None
         
         if actions is not None:
@@ -860,18 +853,13 @@ class FrameWiseScaleAllocatorLightV2(ModuleUtilsMixin, nn.Module):
 
 if __name__ == '__main__':
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    
-    print("=" * 60)
-    print("Testing FrameWiseScaleAllocatorLightV2")
-    print("=" * 60)
-    
+
     DIM = 512
     MAX_FRAMES = 32
     PATCHES_PER_FRAME = 64
     MAX_TEXT_LEN = 128
     BATCH_SIZE = 4
-    
-    print("\n--- Testing Basic Version ---")
+
     model = FrameWiseScaleAllocatorLightV2(
         dim=DIM,
         depth=2,
@@ -904,29 +892,12 @@ if __name__ == '__main__':
         text_mask=text_mask,
         visual_per_sample=[1, 1, 1, 1],  # 4 个样本，每个 1 个 object
     )
-    
-    print(f"Output shapes:")
-    print(f"  raw_actions: {raw_actions.shape}")
-    print(f"  scales: {scales.shape}")
-    print(f"  log_probs: {log_probs.shape if log_probs is not None else None}")
-    print(f"  scale_mask: {scale_mask.shape}")
-    
+
+    assert raw_actions.shape == scales.shape == scale_mask.shape
+    assert log_probs is not None
     valid_scales = scales[scale_mask]
-    print(f"\nScale statistics:")
-    print(f"  Min: {valid_scales.min().item():.4f}")
-    print(f"  Max: {valid_scales.max().item():.4f}")
-    print(f"  Mean: {valid_scales.mean().item():.4f}")
-    print(f"  In range [0.2, 2.0]: {(valid_scales >= 0.2).all() and (valid_scales <= 2.0).all()}")
-    
-    print(f"\nTemporal consistency check:")
-    for i in range(BATCH_SIZE):
-        sample_scales = scales[i, scale_mask[i]]
-        if len(sample_scales) > 1:
-            scale_diff = (sample_scales[1:] - sample_scales[:-1]).abs().mean()
-            print(f"  Sample {i}: mean scale diff = {scale_diff.item():.4f}")
-    
-    # 测试文本感知版本
-    print("\n--- Testing Text-Conditioned Version ---")
+    assert (valid_scales >= 0.2).all() and (valid_scales <= 2.0).all()
+
     model_tc = FrameWiseScaleAllocatorLightV2(
         dim=DIM,
         depth=2,
@@ -942,20 +913,17 @@ if __name__ == '__main__':
         enable_rope_cache=True,
     ).to(device)
     
-    raw_actions_tc, scales_tc, log_probs_tc, scale_mask_tc = model_tc(
+    _, scales_tc, log_probs_tc, scale_mask_tc = model_tc(
         visual_features_batch=visual_features_batch,
         visual_grid_thw=visual_grid_thw,
         text_features=text_features,
         text_mask=text_mask,
         visual_per_sample=[1, 1, 1, 1],
     )
-    
-    print(f"Text-conditioned model output:")
-    print(f"  scales shape: {scales_tc.shape}")
-    print(f"  mean scale: {scales_tc[scale_mask_tc].mean().item():.4f}")
-    
-    # 测试离散动作版本
-    print("\n--- Testing Discrete Action Version ---")
+
+    assert scales_tc.shape == scale_mask_tc.shape
+    assert log_probs_tc is not None
+
     model_discrete = FrameWiseScaleAllocatorLightV2(
         dim=DIM,
         depth=2,
@@ -968,20 +936,17 @@ if __name__ == '__main__':
         frame_temporal_depth=2,
     ).to(device)
     
-    raw_actions_d, scales_d, log_probs_d, scale_mask_d = model_discrete(
+    _, scales_d, log_probs_d, scale_mask_d = model_discrete(
         visual_features_batch=visual_features_batch,
         visual_grid_thw=visual_grid_thw,
         text_features=text_features,
         text_mask=text_mask,
         visual_per_sample=[1, 1, 1, 1],
     )
-    
-    print(f"Discrete model output:")
-    print(f"  scales shape: {scales_d.shape}")
-    print(f"  unique scale values: {torch.unique(scales_d[scale_mask_d]).tolist()}")
-    
-    # 测试梯度流
-    print("\n--- Testing Gradient Flow ---")
+
+    assert scales_d.shape == scale_mask_d.shape
+    assert log_probs_d is not None
+
     model.train()
     raw_actions, scales, log_probs, scale_mask = model(
         visual_features_batch=visual_features_batch,
@@ -991,15 +956,9 @@ if __name__ == '__main__':
         visual_per_sample=[1, 1, 1, 1],
     )
     
-    # 模拟损失
     loss = scales[scale_mask].mean()
     loss.backward()
-    
-    # 检查梯度
+
     has_grad = sum(1 for p in model.parameters() if p.grad is not None)
     total_params = sum(1 for _ in model.parameters())
-    print(f"  Parameters with grad: {has_grad}/{total_params}")
-    
-    print("\n" + "=" * 60)
-    print("All tests passed!")
-    print("=" * 60)
+    assert total_params > 0 and has_grad == total_params
