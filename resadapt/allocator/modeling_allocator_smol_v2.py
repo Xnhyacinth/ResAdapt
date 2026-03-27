@@ -13,6 +13,7 @@ from resadapt.allocator.attention_utils import (
 )
 from resadapt.allocator.smol_config import SmolAllocatorConfig
 from resadapt.allocator.aznet_smol_v2 import RegressionHeadAllocatorSmol
+from resadapt.allocator.video_decode_utils import patch_video_processor_fetch_videos
 
 
 class SmolAllocatorForConditionalGeneration(PreTrainedModel):
@@ -39,6 +40,7 @@ class SmolAllocatorForConditionalGeneration(PreTrainedModel):
         if hasattr(self.processor, "video_processor") and self.processor.video_processor is not None:
             self.processor.video_processor.num_frames = int(getattr(config, "max_frames", 16))
             self.processor.video_processor.fps = int(getattr(config, "fps", 2.0))
+            patch_video_processor_fetch_videos(self.processor.video_processor)
         if hasattr(self.processor, "image_processor") and self.processor.image_processor is not None:
             self.processor.image_processor.do_image_splitting = False
         self.tokenizer = getattr(self.processor, "tokenizer", None)

@@ -15,6 +15,8 @@ Supports Flash Attention via PyTorch 2.0+ SDPA.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from resadapt.allocator.attention_utils import sdpa_scaled_dot_product_attention as sdpa_attn
 from einops import rearrange, repeat
 from torch.distributions import Beta, Normal, TransformedDistribution
 from torch.distributions.transforms import SigmoidTransform
@@ -182,7 +184,7 @@ class CrossModalMatcher(nn.Module):
                     q.new_full((1,), float("-inf"))
                 ).expand(B, 1, T, N)
             
-            out = F.scaled_dot_product_attention(
+            out = sdpa_attn(
                 q, k, v,
                 attn_mask=attn_mask,
                 dropout_p=self.dropout_p if self.training else 0.0,

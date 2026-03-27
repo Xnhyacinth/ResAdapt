@@ -10,10 +10,18 @@ class SmolAllocatorConfig(PretrainedConfig):
     Additional keys from older saved configurations are accepted via ``**kwargs`` 
     and passed to the underlying ``PretrainedConfig``.
 
-    Note: 
-        Training-time composite tags (such as ``scale_multi_modal_data``) are not stored 
-        in this class; they are managed separately. See ``resadapt.utils.scale_multi_modal_tags`` 
+    Note:
+        Training-time composite tags (such as ``scale_multi_modal_data``) are not stored
+        in this class; they are managed separately. See ``resadapt.utils.scale_multi_modal_tags``
         and ``scripts/main.sh`` for details on composite tag resolution.
+
+    Backbone dtype / attention:
+        ``torch_dtype`` (e.g. ``"bfloat16"`` on Ampere+) is passed to
+        ``AutoModelForImageTextToText.from_pretrained(torch_dtype=...)``.
+        ``_attn_implementation`` is resolved by ``resadapt.allocator.attention_utils``:
+        prefer ``flash_attention_2`` when ``flash_attn`` is installed; otherwise default to
+        ``eager`` for stability (SDPA can hit cuBLAS errors on some drivers). Override with
+        env ``ALLOCATOR_ATTN_IMPLEMENTATION=sdpa`` if you want PyTorch SDPA.
     """
 
     model_type = "smol_allocator"

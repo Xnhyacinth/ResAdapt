@@ -1,5 +1,7 @@
 import torch
 import torch.nn.functional as F
+
+from resadapt.allocator.attention_utils import sdpa_scaled_dot_product_attention as sdpa_attn
 from torch import nn
 from einops import rearrange, repeat
 from torch.distributions import Beta, Categorical, Normal, TransformedDistribution
@@ -192,7 +194,7 @@ class PatchWiseTemporalAttention(nn.Module):
             sdpa_mask = repeat(attn_mask, "b t -> (b l) 1 1 t", l=L)
             sdpa_mask = _sdpa_mask_from_valid(sdpa_mask, dtype=q.dtype)
 
-        out = F.scaled_dot_product_attention(
+        out = sdpa_attn(
             q, k, v,
             attn_mask=sdpa_mask,
             dropout_p=self.dropout_p if self.training else 0.0
@@ -291,7 +293,7 @@ class SpatialAttention(nn.Module):
             sdpa_mask = rearrange(attn_mask, "b t l -> (b t) 1 1 l")
             sdpa_mask = _sdpa_mask_from_valid(sdpa_mask, dtype=q.dtype)
 
-        out = F.scaled_dot_product_attention(
+        out = sdpa_attn(
             q, k, v,
             attn_mask=sdpa_mask,
             dropout_p=self.dropout_p if self.training else 0.0
@@ -339,7 +341,7 @@ class CrossAttention(nn.Module):
             sdpa_mask = rearrange(context_mask, "b m -> b 1 1 m")
             sdpa_mask = _sdpa_mask_from_valid(sdpa_mask, dtype=q.dtype)
 
-        out = F.scaled_dot_product_attention(
+        out = sdpa_attn(
             q, k, v,
             attn_mask=sdpa_mask,
             dropout_p=self.dropout_p if self.training else 0.0

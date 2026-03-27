@@ -5,8 +5,14 @@ from torch.nn.utils.rnn import pad_sequence
 from transformers import AutoProcessor, AutoModelForImageTextToText, PreTrainedModel
 from concurrent.futures import ThreadPoolExecutor
 
+from resadapt.allocator.attention_utils import (
+    forward_hf_text_model_safe,
+    resolve_pretrained_attn_implementation,
+    torch_dtype_for_hf_pretrained,
+)
 from resadapt.allocator.smol_config import SmolAllocatorConfig
 from resadapt.allocator.aznet_smol_v3 import RegressionHeadAllocatorSmol
+from resadapt.allocator.video_decode_utils import patch_video_processor_fetch_videos
 
 
 class SmolAllocatorForConditionalGeneration(PreTrainedModel):
@@ -33,13 +39,17 @@ class SmolAllocatorForConditionalGeneration(PreTrainedModel):
         if hasattr(self.processor, "video_processor") and self.processor.video_processor is not None:
             self.processor.video_processor.num_frames = int(getattr(config, "max_frames", 16))
             self.processor.video_processor.fps = int(getattr(config, "fps", 2.0))
+            # HF may pick torchcodec when importable but FFmpeg/ABI is broken at runtime; try PyAV etc.
+            patch_video_processor_fetch_videos(self.processor.video_processor)
         if hasattr(self.processor, "image_processor") and self.processor.image_processor is not None:
             self.processor.image_processor.do_image_splitting = False
         self.tokenizer = getattr(self.processor, "tokenizer", None)
         self.smol_model = AutoModelForImageTextToText.from_pretrained(
             model_name,
-            dtype=getattr(config, "dtype", "auto"),
-            _attn_implementation=getattr(config, "_attn_implementation", "flash_attention_2"),
+            torch_dtype=torch_dtype_for_hf_pretrained(config),
+            _attn_implementation=resolve_pretrained_attn_implementation(
+                getattr(config, "_attn_implementation", None),
+            ),
         )
         self.allocator = RegressionHeadAllocatorSmol(config)
 
@@ -71,13 +81,12 @@ class SmolAllocatorForConditionalGeneration(PreTrainedModel):
         if text_model is None:
             emb = self.smol_model.get_input_embeddings()
             return emb(input_ids)
-        outputs = text_model(
+        return forward_hf_text_model_safe(
+            text_model,
             input_ids=input_ids,
             attention_mask=attention_mask,
-            output_hidden_states=False,
-            return_dict=True,
+            smol_parent=self.smol_model,
         )
-        return outputs.last_hidden_state if hasattr(outputs, "last_hidden_state") else outputs[0]
 
     def _encode_vision(self, pixel_values):
         vision_model = self._resolve_vision_model()
@@ -597,6 +606,7 @@ if __name__ == "__main__":
         sim_tau=0.55,
         sim_temp=0.12,
         sim_gamma=0.05,
+        torch_dtype="bfloat16" if torch.cuda.is_available() else None,
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = SmolAllocatorForConditionalGeneration(config).to(device)
