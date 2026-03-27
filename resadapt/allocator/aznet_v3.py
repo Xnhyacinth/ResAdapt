@@ -576,6 +576,8 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
                 import numpy as np
                 scale_bins = np.arange(min_scale, max_scale + min_scale, min_scale).tolist()
             self.register_buffer('scale_bins', torch.tensor(scale_bins))
+            # Used in post_init when parameters live on meta device (HF accelerate / from_pretrained).
+            self._scale_bins_list = tuple(float(x) for x in scale_bins)
             self.num_bins = len(scale_bins)
             output_dim = self.num_bins
         else:
@@ -689,41 +691,27 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
             nn.init.zeros_(allocation_last.bias)
 
             target_ratio = self._initial_mean_ratio()
-            bias_device = budget_last.bias.device
-            bias_dtype = budget_last.bias.dtype
-            budget_last.bias.data.fill_(
-                torch.logit(
-                    torch.tensor(target_ratio, device=bias_device, dtype=bias_dtype),
-                    eps=1e-6,
-                )
+            # HF ``from_pretrained`` with meta/accelerate: avoid tensors on ``meta`` for .item() / logit.
+            logit_budget = float(
+                torch.logit(torch.tensor(target_ratio, dtype=torch.float32), eps=1e-6).item()
             )
+            budget_last.bias.data.fill_(logit_budget)
 
             if self.continuous_dist == "logistic_normal":
-                sigma = torch.tensor(
-                    float(self.logistic_normal_init_sigma),
-                    device=variance_last.bias.device,
-                    dtype=variance_last.bias.dtype,
-                ).clamp_min(1e-3)
-                variance_last.bias.data.fill_(self._softplus_inverse(sigma))
+                sigma = max(float(self.logistic_normal_init_sigma), 1e-3)
+                var_bias = float(self._softplus_inverse(torch.tensor(sigma, dtype=torch.float32)).item())
+                variance_last.bias.data.fill_(var_bias)
             else:
                 base_concentration = 4.0 if self.beta_add_one else 2.0
-                feasible_concentration = self._ensure_feasible_beta_concentration(
-                    torch.tensor(target_ratio, device=bias_device, dtype=bias_dtype),
-                    torch.tensor(float(self.init_concentration), device=bias_device, dtype=bias_dtype),
+                feasible_concentration = self._ensure_feasible_beta_concentration_float(
+                    target_ratio, float(self.init_concentration)
                 )
-                target_concentration = torch.maximum(
-                    feasible_concentration,
-                    torch.tensor(base_concentration + 1e-4, device=bias_device, dtype=bias_dtype),
+                target_concentration = max(feasible_concentration, base_concentration + 1e-4)
+                delta = target_concentration - base_concentration
+                var_bias = float(
+                    self._softplus_inverse(torch.tensor(delta, dtype=torch.float32)).item()
                 )
-                variance_last.bias.data.fill_(
-                    self._softplus_inverse(
-                        torch.tensor(
-                            float(target_concentration.item()) - base_concentration,
-                            device=variance_last.bias.device,
-                            dtype=variance_last.bias.dtype,
-                        )
-                    )
-                )
+                variance_last.bias.data.fill_(var_bias)
             return
 
         last_layer = None
@@ -741,28 +729,29 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
                 if last_layer.bias is None:
                     return
                 target_val = float(self.init_scale_mean)
-                diff = torch.abs(self.scale_bins - target_val)
-                target_idx = torch.argmin(diff).item()
+                bins_list = getattr(self, "_scale_bins_list", None)
+                if bins_list:
+                    target_idx = min(
+                        range(len(bins_list)),
+                        key=lambda i: abs(bins_list[i] - target_val),
+                    )
+                else:
+                    sb = self.scale_bins.detach().float().cpu()
+                    target_idx = int(torch.argmin(torch.abs(sb - target_val)).item())
                 nn.init.zeros_(last_layer.bias)
                 last_layer.bias[target_idx] = 0.0
             else:
                 if last_layer.bias is None:
                     return
-                bias_device = last_layer.bias.device
-                bias_dtype = last_layer.bias.dtype
                 target_ratio = self._initial_mean_ratio()
                 if self.continuous_dist == "logistic_normal":
-                    mu_bias = torch.logit(
-                        torch.tensor(target_ratio, device=bias_device, dtype=bias_dtype),
-                        eps=1e-6
+                    mu_bias = float(
+                        torch.logit(torch.tensor(target_ratio, dtype=torch.float32), eps=1e-6).item()
                     )
-                    sigma = torch.tensor(
-                        float(self.logistic_normal_init_sigma),
-                        device=bias_device,
-                        dtype=bias_dtype
-                    ).clamp_min(1e-3)
-                    sigma_bias = self._softplus_inverse(sigma)
-
+                    sigma = max(float(self.logistic_normal_init_sigma), 1e-3)
+                    sigma_bias = float(
+                        self._softplus_inverse(torch.tensor(sigma, dtype=torch.float32)).item()
+                    )
                     last_layer.bias[0] = mu_bias
                     last_layer.bias[1] = sigma_bias
                 else:
@@ -770,11 +759,16 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
                     target_alpha = max(target_sum * target_ratio, 1e-4)
                     target_beta = max(target_sum * (1.0 - target_ratio), 1e-4)
                     offset = 1.0 if self.beta_add_one else 0.0
-                    y0 = torch.tensor(max(1e-4, target_alpha - offset), device=bias_device, dtype=bias_dtype)
-                    y1 = torch.tensor(max(1e-4, target_beta - offset), device=bias_device, dtype=bias_dtype)
+                    y0 = max(1e-4, target_alpha - offset)
+                    y1 = max(1e-4, target_beta - offset)
+                    bps = max(self.beta_param_scale, 1e-6)
                     nn.init.zeros_(last_layer.weight)
-                    last_layer.bias[0] = self._softplus_inverse(y0) / max(self.beta_param_scale, 1e-6)
-                    last_layer.bias[1] = self._softplus_inverse(y1) / max(self.beta_param_scale, 1e-6)
+                    last_layer.bias[0] = float(
+                        self._softplus_inverse(torch.tensor(y0, dtype=torch.float32)).item()
+                    ) / bps
+                    last_layer.bias[1] = float(
+                        self._softplus_inverse(torch.tensor(y1, dtype=torch.float32)).item()
+                    ) / bps
 
     @staticmethod
     def _masked_mean(values: torch.Tensor, mask: torch.Tensor, *, dim: int, keepdim: bool = False) -> torch.Tensor:
@@ -786,6 +780,21 @@ class FrameWiseScaleAllocator(ModuleUtilsMixin, nn.Module):
     def _softplus_inverse(x: torch.Tensor) -> torch.Tensor:
         x = x.clamp_min(1e-6)
         return torch.where(x > 20.0, x, torch.log(torch.expm1(x)))
+
+    def _ensure_feasible_beta_concentration_float(
+        self,
+        mean01: float,
+        concentration: float,
+        *,
+        eps: float = 1e-4,
+    ) -> float:
+        """Same as :meth:`_ensure_feasible_beta_concentration` but Python floats (meta-device safe)."""
+        if not self.beta_add_one:
+            return max(concentration, eps)
+        mean01 = max(min(mean01, 1.0 - eps), eps)
+        offset = 1.0 + eps
+        min_concentration = max(offset / mean01, offset / (1.0 - mean01))
+        return max(max(concentration, min_concentration), eps)
 
     def _ensure_feasible_beta_concentration(
         self,
