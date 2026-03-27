@@ -70,6 +70,7 @@ Example execution from the repository root:
 ```bash
 # Example: 7B model with smol allocator, FSDP2, 1 node
 NNODES=1 \
+NFRAMES=8 \
 ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocator_smol_init \
 TRAIN_FILE=YOUR_WORKSPACE_PATH/data/train.parquet \
 TEST_FILE=YOUR_WORKSPACE_PATH/data/test.parquet \
@@ -78,6 +79,7 @@ nohup bash resadapt/scripts/main.sh Qwen/Qwen2.5-VL-7B-Instruct scale > logs_run
 
 **Key Environment Variables & Parameters:**
 - `NNODES`: Number of nodes to use for distributed training (default: 1).
+- `NFRAMES`: Number of frames for video inputs (default: 8).
 - `ALLOCATOR_PATH`: Path to your initialized allocator weights.
 - `TRAIN_FILE` / `TEST_FILE`: Paths to your training and validation parquet files.
 - `Qwen/Qwen2.5-VL-7B-Instruct`: The backbone model path (first positional argument).
@@ -87,6 +89,7 @@ Alternatively, you can use named arguments:
 
 ```bash
 NNODES=4 \
+NFRAMES=8 \
 ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocator_smol_init \
 TRAIN_FILE=YOUR_WORKSPACE_PATH/data/train.parquet \
 TEST_FILE=YOUR_WORKSPACE_PATH/data/test.parquet \

@@ -28,6 +28,7 @@ echo "2. Launching training examples..."
 
 # Example 1: Qwen2.5-VL-7B training with 1 node, FSDP2
 # NNODES=1 \
+# NFRAMES=8 \
 # ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocator_smol_init \
 # TRAIN_FILE=YOUR_WORKSPACE_PATH/data/train.parquet \
 # TEST_FILE=YOUR_WORKSPACE_PATH/data/test.parquet \
@@ -35,6 +36,7 @@ echo "2. Launching training examples..."
 
 # Example 2: Qwen3-VL-4B training with 2 nodes, FSDP2
 # NNODES=2 \
+# NFRAMES=8 \
 # ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocator_smol_init \
 # TRAIN_FILE=YOUR_WORKSPACE_PATH/data/train.parquet \
 # TEST_FILE=YOUR_WORKSPACE_PATH/data/test.parquet \
@@ -42,6 +44,7 @@ echo "2. Launching training examples..."
 
 # Example 3: Qwen2.5-VL-7B baseline training with 2 nodes
 # NNODES=2 \
+# NFRAMES=8 \
 # ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocator_smol_init \
 # TRAIN_FILE=YOUR_WORKSPACE_PATH/data/train.parquet \
 # TEST_FILE=YOUR_WORKSPACE_PATH/data/test.parquet \

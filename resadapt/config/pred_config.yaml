@@ -1,7 +1,7 @@
 hydra:
   searchpath:
     - file://verl/verl/trainer/config
-    - file://YOUR_WORKSPACE_PATH/ResAdapt/verl/verl/trainer/config
+    - pkg://verl.trainer.config
 
 defaults:
   - ppo_trainer
