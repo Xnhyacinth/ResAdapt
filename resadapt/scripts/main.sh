@@ -302,13 +302,16 @@ ray_env_args+=( "+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_MROPE_PATCH='${V
 # When SCALE_ENABLE_SCALE=1, extra_args push allocator + actor_rollout_ref overrides and
 # sync scale_multi_modal_data across algorithm/allocator/rollout (see scale_multi_modal_tags.py).
 MODEL_NAME=$(basename "${MODEL_PATH}")
-exp_name="${SCALE_MULTI_MODAL_DATA}-${STRATEGY}-${MODEL_NAME}-bsz${train_prompt_bsz}-mini${train_prompt_mini_bsz}-n${N_RESP_PER_PROMPT}-len${PROMPT_LEN}-resp${RESP_LEN}"
+# Extract critical part from model name (e.g., Qwen2.5-VL-7B-Instruct -> Qwen2.5-VL-7B, Llama-3-8B -> Llama-3-8B)
+SHORT_MODEL_NAME=$(echo "$MODEL_NAME" | sed -E 's/-Instruct|-Chat|-Base//g')
+
+exp_name="${SCALE_MULTI_MODAL_DATA}-${STRATEGY}-${SHORT_MODEL_NAME}-bsz${train_prompt_bsz}-mini${train_prompt_mini_bsz}-n${N_RESP_PER_PROMPT}-l${PROMPT_LEN}-r${RESP_LEN}"
 
 if [[ "${SCALE_ENABLE_SCALE}" == "1" ]]; then
     max_prompt_length=${scaled_length}
     use_text=True
     use_discrete_action=False
-    exp_name="${SCALE_MULTI_MODAL_DATA}-${STRATEGY}-s${SCALE_N}-${MODEL_NAME}-bsz${train_prompt_bsz}-mini${train_prompt_mini_bsz}-n${N_RESP_PER_PROMPT}-max${MAX_SCALE}-len${PROMPT_LEN}-resp${RESP_LEN}"
+    exp_name="${SCALE_MULTI_MODAL_DATA}-${STRATEGY}-s${SCALE_N}-${SHORT_MODEL_NAME}-bsz${train_prompt_bsz}-mini${train_prompt_mini_bsz}-n${N_RESP_PER_PROMPT}-max${MAX_SCALE}-l${PROMPT_LEN}-r${RESP_LEN}"
     
     extra_args+=( "+allocator.model.override_config.max_frames=${NFRAMES}" )
     extra_args+=( "algorithm.max_scale=${MAX_SCALE}" )
@@ -372,6 +375,23 @@ if [[ "${SCALE_ENABLE_NOTEST}" == "1" ]]; then
     test_freq=-1
     val_before_train=False
 fi
+
+# Apply string replacements to shorten the experiment name (similar to predictor/main.sh)
+exp_name=$(echo "$exp_name" | sed \
+    -e 's/tie_acc_cost_enc/tie_enc/g' \
+    -e 's/ispred/is/g' \
+    -e 's/flash/fla/g' \
+    -e 's/gate/gt/g' \
+    -e 's/filter/filt/g' \
+    -e 's/nframes8_offline/n8_off/g' \
+    -e 's/sta/s/g' \
+    -e 's/newtie/new/g' \
+    -e 's/scale/sc/g' \
+    -e 's/frozen/fr/g' \
+    -e 's/nframes/nf/g' \
+    -e 's/video_mrope/vidm/g' \
+    -e 's/fsdp2/dp2/g' \
+    -e 's/ray/r/g')
 
 # ==============================================================================
 # 7. Execution Command Construction

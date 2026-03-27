@@ -22,7 +22,7 @@ conda activate resadapt
 pip install -e ".[vllm]"
 pip install "transformers<5.0"
 pip install flash-attn --no-build-isolation
-pip install rouge_score sympy num2words numpy==1.26.4
+pip install rouge_score sympy num2words numpy==1.26.4 qwen_vl_utils
 # For CUDA-enabled TorchCodec (replace cu128 with your CUDA version, e.g., cu118, cu121)
 conda install "ffmpeg" -c conda-forge
 pip install torchcodec --index-url=https://download.pytorch.org/whl/cu128
