@@ -301,13 +301,14 @@ ray_env_args+=( "+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_MROPE_PATCH='${V
 # ==============================================================================
 # When SCALE_ENABLE_SCALE=1, extra_args push allocator + actor_rollout_ref overrides and
 # sync scale_multi_modal_data across algorithm/allocator/rollout (see scale_multi_modal_tags.py).
-exp_name="${SCALE_MULTI_MODAL_DATA}-${STRATEGY}-${MODEL_SIZE}-bsz${train_prompt_bsz}-mini${train_prompt_mini_bsz}-n${N_RESP_PER_PROMPT}-len${PROMPT_LEN}-resp${RESP_LEN}"
+MODEL_NAME=$(basename "${MODEL_PATH}")
+exp_name="${SCALE_MULTI_MODAL_DATA}-${STRATEGY}-${MODEL_NAME}-bsz${train_prompt_bsz}-mini${train_prompt_mini_bsz}-n${N_RESP_PER_PROMPT}-len${PROMPT_LEN}-resp${RESP_LEN}"
 
 if [[ "${SCALE_ENABLE_SCALE}" == "1" ]]; then
     max_prompt_length=${scaled_length}
     use_text=True
     use_discrete_action=False
-    exp_name="${SCALE_MULTI_MODAL_DATA}-${STRATEGY}-s${SCALE_N}-${MODEL_SIZE}-bsz${train_prompt_bsz}-mini${train_prompt_mini_bsz}-n${N_RESP_PER_PROMPT}-max${MAX_SCALE}-len${PROMPT_LEN}-resp${RESP_LEN}"
+    exp_name="${SCALE_MULTI_MODAL_DATA}-${STRATEGY}-s${SCALE_N}-${MODEL_NAME}-bsz${train_prompt_bsz}-mini${train_prompt_mini_bsz}-n${N_RESP_PER_PROMPT}-max${MAX_SCALE}-len${PROMPT_LEN}-resp${RESP_LEN}"
     
     extra_args+=( "+allocator.model.override_config.max_frames=${NFRAMES}" )
     extra_args+=( "algorithm.max_scale=${MAX_SCALE}" )
