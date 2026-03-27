@@ -26,14 +26,26 @@ echo "1. Initializing and saving the allocator..."
 # ------------------------------------------------------------------------------
 echo "2. Launching training examples..."
 
-# Example 1: Qwen2.5-VL-7B training with 4 nodes, FSDP2
-# NNODES=4 nohup bash resadapt/scripts/main.sh 7B mix_pt_asym_scale_smolv4_sim_ccen_filter_frozen_newtie_acc_cost_enc0.25_cen0.4_nframes128_video_mrope 8 8 fsdp2 1.8 1 16 2e-5 0 > logs_run/mix_ray4_pt_asym_scale_smolv4_sim_ccen_filter_frozen_newtie_acc_cost_enc0.25_cen0.4_nframes128_video_mrope_fsdp2_7b_s16_n1_min0.2_max_1.8_mini64_bsz128_len8_resp8_2e-5.log 2>&1 &
+# Example 1: Qwen2.5-VL-7B training with 1 node, FSDP2
+# NNODES=1 \
+# ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocator_smol_init \
+# TRAIN_FILE=YOUR_WORKSPACE_PATH/data/train.parquet \
+# TEST_FILE=YOUR_WORKSPACE_PATH/data/test.parquet \
+# nohup bash resadapt/scripts/main.sh Qwen/Qwen2.5-VL-7B-Instruct scale > logs_run/train_7b.log 2>&1 &
 
 # Example 2: Qwen3-VL-4B training with 2 nodes, FSDP2
-# NNODES=2 MODEL_PATH=Qwen/Qwen3-VL-4B-Instruct nohup bash resadapt/scripts/main.sh 4B mix_base_nframes32_video 4 8 fsdp2 1.5 16 1 1e-5 0 > logs_run/mix_ray2_base_nframes32_video_4b_n16_mini64_bsz128_len4_resp8.log 2>&1 &
+# NNODES=2 \
+# ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocator_smol_init \
+# TRAIN_FILE=YOUR_WORKSPACE_PATH/data/train.parquet \
+# TEST_FILE=YOUR_WORKSPACE_PATH/data/test.parquet \
+# nohup bash resadapt/scripts/main.sh Qwen/Qwen3-VL-4B-Instruct scale > logs_run/train_4b.log 2>&1 &
 
 # Example 3: Qwen2.5-VL-7B baseline training with 2 nodes
-# NNODES=2 nohup bash resadapt/scripts/main.sh 7B mix_base_nframes64_video 8 8 fsdp2 1.5 16 1 1e-5 0 > logs_run/mix_ray2_base_nframes64_video_7b_n16_mini64_bsz128_len8_resp8.log 2>&1 &
+# NNODES=2 \
+# ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocator_smol_init \
+# TRAIN_FILE=YOUR_WORKSPACE_PATH/data/train.parquet \
+# TEST_FILE=YOUR_WORKSPACE_PATH/data/test.parquet \
+# nohup bash resadapt/scripts/main.sh Qwen/Qwen2.5-VL-7B-Instruct base > logs_run/train_7b_base.log 2>&1 &
 
 
 # ------------------------------------------------------------------------------

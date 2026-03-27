@@ -63,19 +63,34 @@ ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocator_smol_init
 
 ### 3. Run Training
 
-Use `run.sh` to configure the training parameters and launch the job. The `run.sh` script provides examples of how to run the pipeline across multiple nodes with FSDP2.
+Use `run.sh` to configure the training parameters and launch the job. The training script supports configurable environment variables for adjusting paths and parameters.
 
 Example execution from the repository root:
 
 ```bash
-# Example: 7B model with smol_v2 allocator, FSDP2, 4 nodes
-NNODES=4 nohup bash resadapt/scripts/main.sh Qwen/Qwen2.5-VL-7B-Instruct scale > logs_run/train_7b.log 2>&1 &
+# Example: 7B model with smol allocator, FSDP2, 1 node
+NNODES=1 \
+ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocator_smol_init \
+TRAIN_FILE=YOUR_WORKSPACE_PATH/data/train.parquet \
+TEST_FILE=YOUR_WORKSPACE_PATH/data/test.parquet \
+nohup bash resadapt/scripts/main.sh Qwen/Qwen2.5-VL-7B-Instruct scale > logs_run/train_7b.log 2>&1 &
 ```
+
+**Key Environment Variables & Parameters:**
+- `NNODES`: Number of nodes to use for distributed training (default: 1).
+- `ALLOCATOR_PATH`: Path to your initialized allocator weights.
+- `TRAIN_FILE` / `TEST_FILE`: Paths to your training and validation parquet files.
+- `Qwen/Qwen2.5-VL-7B-Instruct`: The backbone model path (first positional argument).
+- `scale`: The configuration tag for multimodal data scaling (second positional argument).
 
 Alternatively, you can use named arguments:
 
 ```bash
-NNODES=4 nohup bash resadapt/scripts/main.sh --model_path Qwen/Qwen2.5-VL-7B-Instruct --scale_data scale > logs_run/train_7b.log 2>&1 &
+NNODES=4 \
+ALLOCATOR_PATH=YOUR_WORKSPACE_PATH/models/allocator_smol_init \
+TRAIN_FILE=YOUR_WORKSPACE_PATH/data/train.parquet \
+TEST_FILE=YOUR_WORKSPACE_PATH/data/test.parquet \
+nohup bash resadapt/scripts/main.sh --model_path Qwen/Qwen2.5-VL-7B-Instruct --scale_data scale > logs_run/train_7b.log 2>&1 &
 ```
 
 ### Evaluation
