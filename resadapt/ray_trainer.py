@@ -1339,6 +1339,20 @@ class RayPPOTrainer:
         # sleep all replicas to load checkpoint
         self.checkpoint_manager.sleep_replicas()
 
+    def _actor_frozen(self) -> bool:
+        """True when scale tag includes ``actor_frozen`` (allocator training; actor not updated)."""
+        tag = _resolve_scale_multi_modal_tag(self.config).lower()
+        return bool(tag and "actor_frozen" in tag)
+
+    @staticmethod
+    def _checkpoint_dir_nonempty(path: str) -> bool:
+        if not os.path.isdir(path):
+            return False
+        try:
+            return any(os.scandir(path))
+        except OSError:
+            return False
+
     def _save_checkpoint(self):
         from verl.utils.fs import local_mkdir_safe
 
@@ -1348,6 +1362,10 @@ class RayPPOTrainer:
         )
 
         print(f"local_global_step_folder: {local_global_step_folder}")
+        actor_frozen = self._actor_frozen()
+        # Allocator-only checkpoints skip actor/critic shards; ensure step folder exists.
+        if actor_frozen:
+            local_mkdir_safe(local_global_step_folder)
         actor_local_path = os.path.join(local_global_step_folder, "actor")
 
         actor_remote_path = (
@@ -1369,11 +1387,16 @@ class RayPPOTrainer:
             self.config.trainer.get("max_critic_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
         )
 
-        self.actor_rollout_wg.save_checkpoint(
-            actor_local_path, actor_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep
-        )
+        if not actor_frozen:
+            self.actor_rollout_wg.save_checkpoint(
+                actor_local_path, actor_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep
+            )
+        elif getattr(self, "rank", 0) == 0:
+            print(
+                "[trainer] Skipping actor checkpoint save (actor_frozen): only allocator (+ data.pt) are persisted."
+            )
 
-        if self.use_critic:
+        if self.use_critic and not actor_frozen:
             critic_local_path = os.path.join(local_global_step_folder, str(Role.Critic))
             critic_remote_path = (
                 None
@@ -1461,15 +1484,36 @@ class RayPPOTrainer:
 
         actor_path = os.path.join(global_step_folder, "actor")
         critic_path = os.path.join(global_step_folder, str(Role.Critic))
-        # load actor
-        self.actor_rollout_wg.load_checkpoint(
-            actor_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
-        )
+        actor_frozen = self._actor_frozen()
+        # load actor (optional for allocator-only checkpoints when actor_frozen)
+        if self._checkpoint_dir_nonempty(actor_path):
+            self.actor_rollout_wg.load_checkpoint(
+                actor_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
+            )
+        elif actor_frozen:
+            if getattr(self, "rank", 0) == 0:
+                print(
+                    f"[trainer] No actor checkpoint under {actor_path}; keeping initialized actor "
+                    "(allocator-only resume, actor_frozen)."
+                )
+        else:
+            raise FileNotFoundError(
+                f"Expected actor checkpoint at {actor_path} for resume. "
+                "Use actor_frozen scale tag for allocator-only checkpoints, or provide actor shards."
+            )
         # load critic
         if self.use_critic:
-            self.critic_wg.load_checkpoint(
-                critic_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
-            )
+            if self._checkpoint_dir_nonempty(critic_path):
+                self.critic_wg.load_checkpoint(
+                    critic_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
+                )
+            elif actor_frozen:
+                if getattr(self, "rank", 0) == 0:
+                    print(
+                        f"[trainer] No critic checkpoint under {critic_path}; skipping critic load (actor_frozen)."
+                    )
+            else:
+                raise FileNotFoundError(f"Expected critic checkpoint at {critic_path} for resume.")
 
         ###
         if self.use_allocator:
@@ -1714,6 +1758,20 @@ class RayPPOTrainer:
 
     ###
     def _update_allocator(self, batch: DataProto) -> DataProto:
+        scale_tag = resolve_scale_multi_modal_data_tag(self.config)
+        if not scale_tag:
+            scale_tag = str(self.config.allocator.get("scale_multi_modal_data") or "scale")
+        scale_lower = str(scale_tag).lower()
+        # Post-update allocator log-probs (ispred): needed for (i) backbone PPO IS in dp_actor
+        # (exp(Δ log q_θ); paper Eq. 186--199) and (ii) SID alignment after filtered updates.
+        # When actor_frozen, skip (i); still run (ii) if use_filter_sid and scale_n>1.
+        need_allocator_post_log_probs = False
+        if "ispred" in scale_lower:
+            if not self._actor_frozen():
+                need_allocator_post_log_probs = True
+            elif self.config.algorithm.get("use_filter_sid", False) and self.config.allocator.get("scale_n", 1) > 1:
+                need_allocator_post_log_probs = True
+
         if self.config.algorithm.get("use_filter_sid", False) and self.config.allocator.get("scale_n", 1) > 1:
             # print("update filter sid")
             pred_mask = batch.batch['allocator_update_mask']
@@ -1747,6 +1805,8 @@ class RayPPOTrainer:
             )
         else:
             batch_scaled = batch
+
+        batch_scaled.meta_info["need_allocator_post_log_probs"] = need_allocator_post_log_probs
 
         rollout_config = self.config.actor_rollout_ref.rollout
         batch_scaled.meta_info["multi_turn"] = rollout_config.multi_turn.enable
@@ -1793,21 +1853,23 @@ class RayPPOTrainer:
             allocator_output = self.allocator_wg.update_allocator(batch_scaled)
 
         batch.meta_info["metrics"] = allocator_output.meta_info["metrics"]
-        # Align with algorithm/rollout tag (main.sh sets all three; manual overrides may not).
-        scale_tag = resolve_scale_multi_modal_data_tag(self.config)
-        if not scale_tag:
-            scale_tag = str(self.config.allocator.get("scale_multi_modal_data") or "scale")
-        scale_multi_modal_data = str(scale_tag).lower()
-        if self.config.algorithm.get("use_filter_sid", False) and "ispred" in scale_multi_modal_data:
-            if self.config.allocator.get("scale_n", 1) > 1:
+        # Merge post-update allocator log-probs when worker computed them (see need_allocator_post_log_probs).
+        if need_allocator_post_log_probs:
+            out_b = getattr(allocator_output, "batch", None)
+            if out_b is None or "allocator_log_probs" not in out_b:
+                raise KeyError(
+                    "need_allocator_post_log_probs but allocator_output missing allocator_log_probs; "
+                    "check fsdp_workers update_allocator / ispred path."
+                )
+            if self.config.algorithm.get("use_filter_sid", False) and self.config.allocator.get("scale_n", 1) > 1:
                 batch.batch["allocator_log_probs"] = align_allocator_log_probs_to_batch(
                     original_sids=batch.non_tensor_batch["sid"],
                     updated_sids=batch_scaled.non_tensor_batch["sid"],
-                    updated_log_probs=allocator_output.batch["allocator_log_probs"],
+                    updated_log_probs=out_b["allocator_log_probs"],
                     old_log_probs=batch.batch["allocator_old_log_probs"],
                 )
             else:
-                batch.batch['allocator_log_probs'] = allocator_output.batch['allocator_log_probs']
+                batch.batch["allocator_log_probs"] = out_b["allocator_log_probs"]
 
         need_frame_metrics_align = (
             self.config.algorithm.get("use_filter_sid", False)
@@ -2059,6 +2121,7 @@ class RayPPOTrainer:
                     #   Note: π_old computed once per data batch, serves as stable reference during mini-batch updates
                     rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
                     bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
+                    actor_frozen = self._actor_frozen()
                     if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
                         from verl.trainer.ppo.rollout_corr_helper import apply_bypass_mode
 
@@ -2067,6 +2130,49 @@ class RayPPOTrainer:
                             rollout_corr_config=rollout_corr_config,
                             policy_loss_config=self.config.actor_rollout_ref.actor.policy_loss,
                         )
+                    elif actor_frozen and "rollout_log_probs" in batch.batch:
+                        # Same substitution as bypass_mode, without switching policy loss mode (actor update is skipped).
+                        batch.batch["old_log_probs"] = batch.batch["rollout_log_probs"]
+                        if getattr(self, "rank", 0) == 0:
+                            print(
+                                "[trainer] Using rollout_log_probs as old_log_probs (actor_frozen; skipping actor forward)."
+                            )
+                    elif actor_frozen:
+                        if getattr(self, "rank", 0) == 0:
+                            print(
+                                "[trainer] actor_frozen but rollout_log_probs missing; "
+                                "falling back to compute_log_prob (enable rollout log probs to avoid this)."
+                            )
+                        with marked_timer("old_log_prob", timing_raw, color="blue"):
+                            old_log_prob, old_log_prob_mfu = self._compute_old_log_prob(batch)
+                            entropys = old_log_prob.batch["entropys"]
+                            response_masks = batch.batch["response_mask"]
+                            actor_config = self.config.actor_rollout_ref.actor
+                            entropy_agg = agg_loss(
+                                loss_mat=entropys,
+                                loss_mask=response_masks,
+                                loss_agg_mode=actor_config.loss_agg_mode,
+                                loss_scale_factor=actor_config.loss_scale_factor,
+                            )
+                            old_log_prob_metrics = {
+                                "actor/entropy": entropy_agg.detach().item(),
+                                "perf/mfu/actor_infer": old_log_prob_mfu,
+                            }
+                            metrics.update(old_log_prob_metrics)
+                            old_log_prob.batch.pop("entropys")
+                            if "routed_experts" in batch.batch and "routed_experts" in old_log_prob.batch:
+                                router_mode = getattr(
+                                    self.config.actor_rollout_ref.actor.router_replay, "mode", "disabled"
+                                )
+                                if router_mode == "R2":
+                                    batch.batch.pop("routed_experts")
+                                else:
+                                    old_log_prob.batch.pop("routed_experts")
+                            batch = batch.union(old_log_prob)
+                            if "rollout_log_probs" in batch.batch.keys():
+                                from verl.utils.debug.metrics import calculate_debug_metrics
+
+                                metrics.update(calculate_debug_metrics(batch))
                     else:  # Recompute old_log_probs
                         with marked_timer("old_log_prob", timing_raw, color="blue"):
                             old_log_prob, old_log_prob_mfu = self._compute_old_log_prob(batch)
@@ -2183,8 +2289,7 @@ class RayPPOTrainer:
                         # breakpoint()
                         # print("update actor")
                         # update actor (skip if actor is frozen based on scale_multi_modal_data config)
-                        scale_multi_modal_data = _resolve_scale_multi_modal_tag(self.config).lower()
-                        if scale_multi_modal_data and "actor_frozen" in scale_multi_modal_data:
+                        if actor_frozen:
                             if getattr(self, "rank", 0) == 0:
                                 print("[trainer] Skipping actor update (actor is frozen).")
                         else:

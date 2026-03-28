@@ -153,7 +153,12 @@ TEST_FILE=${TEST_FILE:-"${PROJECT_ROOT}/data/test.parquet"}
 #
 # Substring reference (full table): resadapt/utils/scale_multi_modal_tags.py
 # Not in scale_parts below but used in code when appended manually: aw (frame-aware),
-# ispred (predictor log-prob alignment with use_filter_sid), hadw (GRPO cost path).
+# ispred (post-update q_phi for backbone PPO IS + optional SID align), hadw (GRPO cost path).
+#
+# ispred x actor_frozen: backbone importance sampling (dp_actor) uses allocator_log_probs
+# vs allocator_old_log_probs only when the actor step runs. If a knob only affects that
+# path, keep SCALE_ENABLE_ACTOR_FROZEN=0. With actor_frozen=1, ray_trainer still requests
+# post-update allocator log-probs only when use_filter_sid and scale_n>1 (filtered-batch align).
 #
 # Base scale configurations
 SCALE_BASE=${SCALE_BASE:-"${SCALE_MULTI_MODAL_DATA}"} # Base identifier for the scale config

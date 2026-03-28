@@ -1043,7 +1043,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             ###
             scale_multi_modal_data = self.config.get("scale_multi_modal_data", None)
-            if scale_multi_modal_data and "ispred" in scale_multi_modal_data:
+            if (
+                scale_multi_modal_data
+                and "ispred" in scale_multi_modal_data
+                and "allocator_log_probs" in data.batch
+            ):
                 data.meta_info["is_pred"] = True
             ###
 
@@ -2513,9 +2517,16 @@ class AllocatorWorker(Worker, DistProfilerExtension):
                 data.meta_info["contrastive_coef"] = self.config.scale.get("contrastive_coef", 0.0)
                 data.meta_info["concentration_coef"] = self.config.scale.get("concentration_coef", 0.0)
                 
-                is_pred = False
                 compute_frame_metrics = False
                 scale_multi_modal_data = str(self.config.get("scale_multi_modal_data", "")).lower()
+                # Post-update q_θ(a|x) for backbone PPO IS (paper Eq. 186--199) and/or SID alignment.
+                # Driver sets need_allocator_post_log_probs=False when actor_frozen and no filtered batch.
+                need_post = data.meta_info.get("need_allocator_post_log_probs", None)
+                if need_post is None:
+                    need_post = bool(scale_multi_modal_data and "ispred" in scale_multi_modal_data)
+                is_pred = bool(scale_multi_modal_data and "ispred" in scale_multi_modal_data) and need_post
+                if is_pred:
+                    data.meta_info["is_pred"] = True
                 
                 # `use_cost` is passed from ray_trainer.py via data.meta_info to ensure it reflects 
                 # any dynamic switches applied during advantage computation. Fallback to self.config.
@@ -2525,11 +2536,6 @@ class AllocatorWorker(Worker, DistProfilerExtension):
                 # Determine if we need to compute frame metrics based on the cost function configuration.
                 # This aligns with the requirements in advantage computation.
                 needs_frame_metrics = use_cost_implies_compute_frame_metrics(use_cost_value)
-                
-                # If the scale configuration explicitly requests log-prob predictions ('ispred'), enable it.
-                if scale_multi_modal_data and "ispred" in scale_multi_modal_data:
-                    is_pred = True
-                    data.meta_info["is_pred"] = is_pred
                 
                 # Enable frame metrics computation if required by either the scale configuration ('aw') 
                 # or the cost function configuration.
