@@ -541,7 +541,17 @@ class DataParallelPPOActor(BasePPOActor):
         if self.use_prefix_grouper and "uid" in data.non_tensor_batch.keys():
             non_tensor_select_keys.append("uid")
 
-        ###
+        # ------------------------------------------------------------------
+        # Joint objective (allocation φ + LM θ): p(y,a|x) = q_φ(a|x) π_θ(y|x,a).
+        # One training step (see ray_trainer): rollout under (φ_old, θ_old) → advantages
+        # → _update_allocator (φ_old→φ′) → merge allocator_log_probs = q_{φ′}(a|x) →
+        # _update_actor. For the θ gradient using fixed (x,a,y), the change in the
+        # marginal over allocations is reweighted by ρ_φ = q_{φ′}(a|x)/q_{φ_old}(a|x).
+        # With per-frame log-probs, use sum_f Δlog q_f (masked) then exp; broadcast to
+        # token-level advantages before the usual PPO surrogate in q_θ (ratio r_θ).
+        # Allocator PPO (dp_allocator) already uses r_φ = exp(log q_φ − log q_{φ_old})
+        # on its own action log-probs; that is separate from this θ-side correction.
+        # ------------------------------------------------------------------
         is_pred = data.meta_info.pop("is_pred", False)
         if is_pred and "allocator_log_probs" in data.batch.keys():
             select_keys.extend(["allocator_log_probs", "allocator_old_log_probs", "scale_mask"])
@@ -584,6 +594,7 @@ class DataParallelPPOActor(BasePPOActor):
                     advantages = model_inputs["advantages"]
 
                     ###
+                    # ρ_φ = exp(log q_{φ′} − log q_{φ_old}) on the sampled allocation a (masked).
                     if is_pred and "allocator_log_probs" in model_inputs.keys():
                         print("cal negative_approx_kl for dp actor!")
                         allocator_old_log_prob = model_inputs["allocator_old_log_probs"]
