@@ -1,0 +1,22 @@
+dataset_name: "Comprehension"
+task: "video_mmmu_comprehension_boxed"
+test_split: test
+output_type: generate_until
+doc_to_visual: !function utils.videommmu_doc_to_visual
+doc_to_text: !function utils.videommmu_doc_to_text_perception_comprehension
+doc_to_target: !function utils.videommmu_doc_to_answer
+generation_kwargs:
+  max_new_tokens: 8192
+  until: []
+process_results: !function utils_boxed.videommmu_process_results
+metric_list:
+  - metric: mmmu_acc
+    aggregation: !function utils.videommmu_aggregate_results
+    higher_is_better: true
+include: _default_template_yaml
+lmms_eval_specific_kwargs:
+  default:
+    pre_prompt: "You should watch and learn the video content. Then apply what you learned to "
+    perception_and_comprehension_prompt: "\nPlease ignore the Quiz question in last frame of the video. Put your final answer in \\boxed{}."
+    mcq_prompt: "answer the following multi-choice question. The image for this question is at the end of the video.\nPut your final answer in \\boxed{}.\n"
+    open_ended_prompt: "answer the following open-ended question. The image for this question is at the end of the video.\nPut your final answer in \\boxed{}.\n"

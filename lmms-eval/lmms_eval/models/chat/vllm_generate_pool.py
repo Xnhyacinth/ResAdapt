@@ -1,0 +1,427 @@
+import os
+import time
+from concurrent.futures import ThreadPoolExecutor
+from typing import List, Optional, Tuple
+
+from tqdm import tqdm
+from transformers import AutoProcessor
+
+from lmms_eval.api.instance import Instance
+from lmms_eval.api.registry import register_model
+from lmms_eval.imports import optional_import
+from lmms_eval.models.chat.vllm import VLLM as VLLMChat
+from lmms_eval.models.model_utils.gen_metrics import log_metrics
+from lmms_eval.protocol import ChatMessages
+
+LLM, _ = optional_import("vllm", "LLM")
+SamplingParams, _ = optional_import("vllm", "SamplingParams")
+fetch_video, _ = optional_import("qwen_vl_utils", "fetch_video")
+process_vision_info, _ = optional_import("qwen_vl_utils", "process_vision_info")
+
+WORKERS = int(os.getenv("WORKERS", "32"))
+
+###
+import torch
+import requests
+from PIL import Image
+from io import BytesIO
+import base64
+import gc
+from visionthink.adaptive.utils import tensor_to_pil_list, expand_video_prompt, expand_image_prompt, deserialize_base64_to_tensor
+###
+
+@register_model("vllm_generate_pool")
+class VLLMGeneratePool(VLLMChat):
+    """
+    Different from .chat, use generate method instead of chat method.
+    The input is a list of vllm inputs, and the output is a list of responses.
+    The vllm inputs are a list of dictionaries, each dictionary contains the following keys:
+    - prompt: the prompt to the model
+    - multi_modal_data: the multi-modal data to the model
+    - mm_processor_kwargs: the multi-modal processor kwargs to the model
+    The vllm inputs are built from the Instance.
+    The responses are a list of strings.
+
+    So that we allow the processor to process correct video especially for Qwen3-VL series
+    """
+
+    is_simple = False
+
+    def __init__(
+        self,
+        model="Qwen/Qwen2.5-VL-3B-Instruct",
+        tensor_parallel_size=1,
+        data_parallel_size=1,
+        gpu_memory_utilization=0.8,
+        batch_size=1,
+        max_frame_num=768,
+        trust_remote_code=True,
+        chat_template=None,
+        max_pixels: int = 1605632,
+        min_image_pixels=28,
+        fps: Optional[int] = None,
+        nframes: Optional[int] = 32,
+        **kwargs,
+    ):  
+        ###
+        # self.predictor = None
+        # predictor_path = os.path.join(model, "pred")
+        # if os.path.exists(predictor_path):
+        self.predictor_path = os.getenv("PREDICTOR_PATH", None)
+        enable_baseline_scale = os.environ.get("ENABLE_BASELINE_SCALE", None)
+        if self.predictor_path is not None or enable_baseline_scale is not None:
+            print(f"[VLLMGenerateCustom] Found predictor at {self.predictor_path}, loading... and patching...")
+            print(f"[VLLMGenerateCustom] Found enable_baseline_scale: {enable_baseline_scale}")
+
+            from visionthink.predictor.multi_model_limit import MultiGPUInferPool
+
+            self.pool = MultiGPUInferPool(
+                model_path=self.predictor_path,
+                num_gpus=8,
+                enable_batch=False,
+                microbatch_ms=10,
+                microbatch_max=1,
+                max_total_inflight=8,
+                max_inflight_per_gpu=1,
+                max_queue_per_gpu=2,
+            )
+            self.pool.start()
+            
+        #     # os.environ["PREDICTOR_PATH"] = predictor_path
+        #     from visionthink.adaptive.utils import _apply_hf_processor_main, __init__
+        #     import vllm.model_executor.models.qwen2_5_vl
+        #     from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VLMultiModalProcessor
+            
+            # Qwen2_5_VLMultiModalProcessor.__init__ = __init__
+            # vllm.model_executor.models.qwen2_5_vl.Qwen2_5_VLMultiModalProcessor._apply_hf_processor_main = _apply_hf_processor_main
+
+            # import visionthink.predictor.vllm_patch
+            # from transformers import AutoConfig, AutoModel
+            # from visionthink.predictor.modeling_predictor import PredictorForConditionalGeneration
+            
+            # # config = AutoConfig.from_pretrained(predictor_path, trust_remote_code=True)
+            # self.predictor = PredictorForConditionalGeneration.from_pretrained(
+            #     predictor_path,
+            #     dtype="auto",
+            #     device_map="auto",
+            #     attn_implementation="flash_attention_2",
+            #     trust_remote_code=True
+            # )
+            # self.predictor.eval() # Eval mode for memory efficiency
+
+
+            # PREDICTOR_URL = "http://localhost:8000/init" 
+            # os.environ["no_proxy"] = "*" 
+            # payload = {"predictor_path": self.predictor_path,}
+
+            # try:
+            #     response = requests.post(
+            #         PREDICTOR_URL, 
+            #         json=payload, 
+            #         timeout=120,
+            #     )
+                
+            #     response.raise_for_status()
+            #     result = response.json()
+                
+            #     print(f"Predictor response: {result}")
+                
+            # except Exception as e:
+            #     print(f"❌ Remote predictor init failed: {e}")
+            #     raise e
+        ###
+
+        super().__init__(model, tensor_parallel_size, data_parallel_size, gpu_memory_utilization, batch_size, max_frame_num, trust_remote_code, chat_template, max_pixels, min_image_pixels, fps, nframes, **kwargs)
+        self.processor = AutoProcessor.from_pretrained(model)
+        if self.chat_template is not None:
+            with open(self.chat_template, "r") as f:
+                chat_template = f.read()
+                self.processor.chat_template = chat_template
+
+    ###
+    def _scale_multi_modal(self, messages, text, images, videos):
+        """
+        Use Predictor to predict the best resolution (Scale) and resize Image and Video Frames.
+        Now supports batch processing and uses standard verl preprocessing flow.
+        """
+        payload = {
+            "messages": [messages],
+            "eval_mode": True,
+        }
+
+        try:
+            out = self.pool.submit_sync(payload, timeout=600)
+
+            if not out.get("ok", True): 
+                raise RuntimeError(out.get("err", "unknown"))
+
+            scaled_multi_modal_data = out.get("scaled_multi_modal_data", None)
+            scale = out.get("scale", 1.0)
+
+            if scaled_multi_modal_data is None:
+                print("scaled_multi_modal_data is None")
+                scale = 1.0
+                return text, images, videos, scale
+                # raise RuntimeError("scaled_multi_modal_data is None")
+
+        except RuntimeError as e:
+            print(f"⚠️ Inference failed: {e}")
+            scale = 1.0
+            return text, images, videos, scale
+
+        scaled_images, scaled_videos = None, None
+
+        if images is not None:
+            scaled_images = [img for mm_item in scaled_multi_modal_data for img in mm_item["images"]]
+            # prompt = expand_image_prompt
+            # print("images", images)
+
+        if videos is not None:
+            scaled_videos = [video[0] for mm_item in scaled_multi_modal_data for video in mm_item["videos"]]
+            video_metadata = [video[1] for mm_item in scaled_multi_modal_data for video in mm_item["videos"]]
+
+            if video_metadata is not None and "video_timestamps" in video_metadata[0].keys():
+                grouped_videos, current_videos = [], []
+
+                for video, meta in zip(scaled_videos, video_metadata):
+                    ts = meta.get("video_timestamps")
+                    if ts == 0 and len(current_videos) > 0:
+                        grouped_videos.append(current_videos)
+                        current_videos = []
+                    current_videos.append(video)
+
+                if len(current_videos) > 0:
+                    grouped_videos.append(current_videos)
+
+                temporal_patch_size = self.processor.video_processor.temporal_patch_size
+                print("before expand_video_prompt", text)
+                text = expand_video_prompt(text, grouped_videos, temporal_patch_size)
+                print("after expand_video_prompt", text)
+
+        return text, scaled_images, scaled_videos, scale
+    ###
+
+    def make_one_request(self, request: Instance) -> Tuple[list[dict], dict]:
+        """
+        Build OpenAI-style messages and per-request sampling params from an Instance.
+        Returns (messages, params_dict). Does not mutate input.
+        """
+        ctx, doc_to_messages, gen_kwargs, doc_id, task, split = request.arguments
+        raw_messages = doc_to_messages(self.task_dict[task][split][doc_id])
+        chat_messages = ChatMessages(messages=raw_messages)
+        # Copy to avoid side-effects across threads
+        _gen = dict(gen_kwargs or {})
+        _gen.setdefault("max_new_tokens", 4096)
+        _gen.setdefault("temperature", 0)
+        _gen.setdefault("top_p", 0.95)
+
+        params = {
+            "temperature": _gen["temperature"],
+            "max_tokens": _gen["max_new_tokens"],
+            "top_p": _gen["top_p"],
+        }
+
+        video_kwargs = {
+            "max_pixels": self.max_pixels,
+            "min_pixels": self.min_image_pixels,
+            "max_frames": self.max_frame_num,
+        }
+        if self.fps is not None:
+            video_kwargs["fps"] = self.fps
+        else:
+            video_kwargs["nframes"] = self.nframes
+        messages = chat_messages.to_hf_messages(video_kwargs=video_kwargs)
+        images, videos, audios = chat_messages.extract_media()
+        video_inputs = []
+        video_metadatas = []
+        kwargs = {}
+        for video in videos:
+            video_dict = {
+                "type": "video",
+                "video": video,
+                **video_kwargs,
+            }
+            final_video, fps = fetch_video(video_dict, return_video_metadata=True, return_video_sample_fps=True)
+            frames, video_metadata = final_video
+            video_inputs.append(frames)
+            video_metadatas.append(video_metadata)
+            kwargs["fps"] = fps
+            kwargs["do_sample_frames"] = False
+        if len(videos) == 0:
+            video_inputs = None
+            video_metadatas = None
+        if len(images) == 0:
+            images = None
+        if len(audios) == 0:
+            audios = None
+
+        text = self.processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+
+        ###
+        if os.environ.get("CONVERT2IMAGES", None) and video_inputs:
+            if images is None:
+                images = []
+            for video in video_inputs:
+                images.extend(tensor_to_pil_list(video))
+            
+            # if os.environ.get("USE_DEBUG", None):
+            #     breakpoint()
+
+            if os.environ.get("REMOVEPAD", None):
+                text = expand_image_prompt(text, video_inputs)
+            else:
+                new_messages = []
+                for msg in messages:
+                    new_msg = msg.copy()
+                    if msg['role'] == 'user':
+                        new_content = []
+                        for content_item in msg['content']:
+                            if content_item['type'] == 'video':
+                                new_videos = []
+                                for image in images:
+                                    new_videos.append({"type": "image", "image": image})
+                                new_content.extend(new_videos)
+                            else:
+                                new_content.append(content_item)
+                        new_msg['content'] = new_content
+                    new_messages.append(new_msg)
+
+                text = self.processor.apply_chat_template(
+                    new_messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )     
+
+            video_inputs = None
+            video_metadatas = None
+        
+        scale = 1.0
+        if self.predictor_path is not None:
+            text, images, video_inputs, scale = self._scale_multi_modal(messages, text, images, video_inputs)
+            
+            # breakpoint()
+        # kwargs["scale"] = True
+        ###
+
+        vllm_inputs = {"prompt": text, "multi_modal_data": {}}
+        if images is not None:
+            vllm_inputs["multi_modal_data"]["image"] = images
+        if video_inputs is not None:
+            vllm_inputs["multi_modal_data"]["video"] = []
+            for video_input, video_metadata in zip(video_inputs, video_metadatas):
+                if "Qwen3VL" in type(self.processor).__name__:
+                    video_input = (video_input, video_metadata)
+                else:
+                    video_input = video_input
+                vllm_inputs["multi_modal_data"]["video"].append(video_input)
+                vllm_inputs["mm_processor_kwargs"] = {
+                    **kwargs,
+                }
+
+        return vllm_inputs, params, scale
+
+    def generate_until(self, requests) -> List[str]:
+        res = []
+        self.load_cache()
+        res, requests = self.get_response_from_cache(requests)
+        pbar = tqdm(total=len(requests), disable=(self.rank != 0), desc="Model Responding")
+
+        batch_size = self.batch_size_per_gpu
+        batched_requests = [requests[i : i + batch_size] for i in range(0, len(requests), batch_size)]
+        e2e_latency = 0
+        for idx, batch_requests in enumerate(batched_requests):
+            batched_vllm_inputs = []
+            scales = []
+            with ThreadPoolExecutor(max_workers=WORKERS) as executor:
+                futures = [executor.submit(self.make_one_request, request) for request in batch_requests]
+                for future in futures:
+                    vllm_inputs, sampling_params, scale = future.result()
+                    batched_vllm_inputs.append(vllm_inputs)
+                    scales.append(scale)
+
+            sampling_params = SamplingParams(**sampling_params)
+            start_time = time.time()
+            # try:
+            response = self.client.generate(batched_vllm_inputs, sampling_params)
+            # except Exception as e:
+            #     # print("batched_vllm_inputs", batched_vllm_inputs)
+            #     # print("sampling_params", sampling_params)
+            #     for idx, vllm_input in enumerate(batched_vllm_inputs):
+            #         print(f"vllm_input: {idx}", vllm_input)
+            #     print("Exception", e)
+            end_time = time.time()
+
+            response_text = [o.outputs[0].text for o in response]
+            ###
+            for req, text, scale in zip(batch_requests, response_text, scales):
+                self.add_request_response_to_cache(req, text)
+                # Store scale information in the request object for later reporting
+                req.scale = scale
+            ###
+            # for req, text in zip(batch_requests, response_text):
+            #     self.add_request_response_to_cache(req, text)
+
+            # Calculate timing metrics for batch
+            e2e_latency += end_time - start_time
+
+            assert len(response_text) == len(batch_requests)
+            res.extend(response_text)
+            pbar.update(len(batch_requests))
+
+            ###
+            if idx % 20 == 0:
+                gc.collect()
+                torch.cuda.empty_cache()
+            ###
+
+        if not self.disable_log_stats:
+            metrics = self.get_format_metrics()
+            total_tokens = metrics["generation_tokens"]
+            avg_speed = total_tokens / e2e_latency if e2e_latency > 0 else 0
+            metric_dict = {
+                "total_tokens": total_tokens,
+                "e2e_latency": e2e_latency,
+                "avg_speed": avg_speed,
+                "additional_metrics": {
+                    "ttft": metrics["ttft"],
+                    "tpot": metrics["tpot"],
+                    "rank": self.rank,
+                },
+            }
+            log_metrics(**metric_dict)
+
+        pbar.close()
+        return res
+
+    def loglikelihood(self, requests: List[Instance]) -> List[Tuple[float, bool]]:
+        # TODO
+        assert False, "GPT4V not support"
+
+    def generate_until_multi_round(self, requests) -> List[str]:
+        raise NotImplementedError("TODO: Implement multi-round generation")
+
+    def get_format_metrics(self):
+        metrics = self.client.get_metrics()
+        ttft = 0
+        tpot = 0
+        generation_tokens = 0
+        for metric in metrics:
+            name = metric.name
+            if "time_to_first_token" in name:
+                ttft = metric.sum / metric.count
+            if "time_per_output_token_seconds" in name:
+                tpot = metric.sum / metric.count
+            if name == "vllm:generation_tokens":
+                generation_tokens = metric.value
+
+        metrics = {
+            "ttft": ttft,
+            "tpot": tpot,
+            "generation_tokens": generation_tokens,
+        }
+
+        return metrics

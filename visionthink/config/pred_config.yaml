@@ -1,0 +1,98 @@
+hydra:
+  searchpath:
+    - file://verl/verl/trainer/config
+    - file:///mnt/bn/jiangzhongtao/users/liaohuanxuan/visionthink/verl/verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  # - ppo_megatron_trainer
+  - _self_
+
+data:
+  acc_reward_weight: 1.0
+  format_reward_weight: 1.0
+  tool_call_penalty: 0.1
+  direct_answer_penalty: 0.0
+  gpt_extract_answer: False
+  mask_blank: False
+  tool_call: False
+  supervise_tool_label: False
+  strict_tool_call_penalty: False
+  extract_answer_tags: split
+  video2image: False
+  video2list: False
+  max_pixels: 602112
+  max_frames: 8
+
+algorithm:
+  use_filter_sid: False
+  use_cost: null
+  cost_penalty_coef: 0.05
+  cost_encouragement_coef: 0.1
+  max_scale: 2.0
+  min_scale: 0.25
+  centered_term: 0.5
+  use_discrete_action: False
+  batch_norm_adv: False
+  use_hadw_in_grpo: False
+  scale_multi_modal_data: null
+
+predictor:
+  enable: False
+  enable_resource_pool: False
+  dedicated_8gpu: False
+  n_gpus_per_node: 8
+  nnodes: 1
+  scale_multi_modal_data: null
+  scale_n: 1
+  video2image: False
+  video2list: False
+  return_mm_data: False
+  scale:
+    scale_start_step: 0
+    num_workers: 8
+    sim_scale_coef: 0.0
+    contrastive_coef: 0.0
+    concentration_coef: 0.0
+  model:
+    # min_scale: 0.25
+    # max_scale: 3.0
+    path: null
+    # scale_multi_modal_data: null
+    # predictor_lr: 1e-5
+    # scale_n: 1
+  actor:
+    optim:
+      lr: 1e-5
+    loss_agg_mode: token-mean
+    use_dynamic_bsz: False
+    ppo_micro_batch_size_per_gpu: 16
+    ulysses_sequence_parallel_size: 1
+    entropy_coeff: 0
+
+actor_rollout_ref:
+  scale_multi_modal_data: null
+  scale_n: 1
+  # actor:
+    # scale_multi_modal_data: False
+    # predictor_lr: 1e-5
+    # scale_n: 1
+  # model:
+    # min_scale: 0.25
+    # max_scale: 3.0
+    # scale_multi_modal_data: null
+    # predictor_lr: 1e-5
+    # scale_n: 1
+# actor_rollout_ref:
+#   actor:
+#     fsdp_config:
+#       min_scale: 0.25
+#       max_scale: 3.0
+
+trainer:
+  rejection_sample: False
+  rejection_sample_multiplier: 1 # Multiple the training batch size by this factor to account for rejection sampling reduction.
+  soft_tool_call_penalty_ratio: 0.0
+  soft_tool_call_filter: False
+
+  # use_3drope: True

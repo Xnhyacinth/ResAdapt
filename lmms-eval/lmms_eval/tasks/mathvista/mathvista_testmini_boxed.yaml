@@ -1,0 +1,9 @@
+group: mathvista_testmini_boxed
+task:
+  - mathvista_testmini_cot_boxed
+  - mathvista_testmini_solution_boxed
+  - mathvista_testmini_format_boxed
+metadata:
+  version: 0.0
+  gpt_eval_model_name: "gpt-3.5-turbo"
+  quick_extract: false
