@@ -544,14 +544,6 @@ if __name__ == "__main__":
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = SmolAllocatorForConditionalGeneration(config).to(device)
-    # "/mnt/bn/jiangzhongtao/users/liaohuanxuan/models/allocatorv2_sft",
-    # model = SmolAllocatorForConditionalGeneration.from_pretrained(
-    #     "/mnt/bn/jiangzhongtao/users/liaohuanxuan/models/allocator_smol_init",
-    #     config=config,
-    #     dtype=torch.bfloat16,
-    #     device_map="auto",
-    #     trust_remote_code=True,
-    # )
 
     count_params(model)
 
