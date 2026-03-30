@@ -1,4 +1,22 @@
-# ResAdapt: Efficient Multimodal Reasoning via Adaptive Resolution
+# Adaptive Resolution for Efficient Multimodal Reasoning
+
+<p align="center">
+  <a href="https://xnhyacinth.github.io/projects/ResAdapt/static/pdfs/ResAdapt.pdf">
+    <img src="https://img.shields.io/badge/arXiv-Paper-red?style=for-the-badge&logo=arxiv" alt="arXiv">
+  </a>
+  <a href="https://github.com/Xnhyacinth/ResAdapt">
+    <img src="https://img.shields.io/github/stars/Xnhyacinth/ResAdapt?style=for-the-badge&logo=github&color=blue" alt="GitHub stars">
+  </a>
+  <a href="https://xnhyacinth.github.io/projects/ResAdapt">
+    <img src="https://img.shields.io/badge/Project-Homepage-green?style=for-the-badge&logo=googlechrome" alt="Homepage">
+  </a>
+  <!-- <a href="">
+    <img src="https://img.shields.io/badge/Dataset-HuggingFace-yellow?style=for-the-badge&logo=huggingface" alt="Dataset">
+  </a>
+  <a href="https://huggingface.co/models">
+    <img src="https://img.shields.io/badge/Models-HuggingFace-orange?style=for-the-badge&logo=huggingface" alt="Models">
+  </a> -->
+</p>
 
 **ResAdapt** is an **Input-side adaptation** framework designed to adaptively allocate visual budgets (such as spatial resolution or tokens) for Vision-Language Models (VLMs) and Video-LMs *before* encoding.
 
