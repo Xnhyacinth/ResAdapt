@@ -1,4 +1,8 @@
-# Adaptive Resolution for Efficient Multimodal Reasoning
+<h1 align="center">
+  <img src="docs/res.png" width="360" alt="ResAdapt" /><br>
+  <b><span style="font-family: Arial, Helvetica, sans-serif; font-size: 1.2em; background: -webkit-linear-gradient(135deg, #3498db, #fe82cf); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">ResAdapt</span></b><br>
+  Adaptive Resolution for Efficient Multimodal Reasoning
+</h1>
 
 <p align="center">
   <a href="https://xnhyacinth.github.io/projects/ResAdapt/static/pdfs/ResAdapt.pdf">
@@ -96,6 +100,7 @@ nohup bash resadapt/scripts/main.sh Qwen/Qwen2.5-VL-7B-Instruct scale > logs_run
 ```
 
 **Key Environment Variables & Parameters:**
+
 - `NNODES`: Number of nodes to use for distributed training (default: 1).
 - `NFRAMES`: Number of frames for video inputs (default: 8).
 - `ALLOCATOR_PATH`: Path to your initialized allocator weights.
