@@ -5,7 +5,7 @@
 </h1>
 
 <p align="center">
-  <a href="https://xnhyacinth.github.io/projects/ResAdapt/static/pdfs/ResAdapt.pdf">
+  <a href="https://arxiv.org/abs/2603.28610">
     <img src="https://img.shields.io/badge/arXiv-Paper-red?style=for-the-badge&logo=arxiv" alt="arXiv">
   </a>
   <a href="https://github.com/Xnhyacinth/ResAdapt">
@@ -136,6 +136,19 @@ nohup bash resadapt/scripts/eval.sh Qwen/Qwen2.5-VL-7B-Instruct vllm_generate vi
 - `resadapt/eval/`: Offline evaluation scripts and utilities.
 - `resadapt/verl_patches/`: Custom patches for the `verl` framework, including data parallel actors and FSDP workers.
 - `run.sh`: High-level entry point showing example commands for training and evaluation.
+
+## Citation
+
+If you find ResAdapt useful, please cite:
+
+```bibtex
+@article{liao2026resadapt,
+  title={ResAdapt: Adaptive Resolution for Efficient Multimodal Reasoning},
+  author={Liao, Huanxuan and Jiang, Zhongtao and Hao, Yupu and Tan, Yuqiao and He, Shizhu and Zhao, Jun and Xu, Kun and Liu, Kang},
+  journal={arXiv preprint arXiv:2603.28610},
+  year={2026}
+}
+```
 
 ## Acknowledgments
 
