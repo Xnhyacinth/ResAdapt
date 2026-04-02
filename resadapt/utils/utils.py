@@ -181,13 +181,22 @@ def __init__(self, *args, **kwargs):
         
     else:
         from resadapt.allocator.modeling_allocator import AllocatorForConditionalGeneration
+        from transformers import AutoConfig
+        from resadapt.allocator.attention_utils import torch_dtype_for_hf_pretrained
+
+        allocator_config = AutoConfig.from_pretrained(allocator_path, trust_remote_code=True)
+        load_kwargs = {
+            "device_map": "auto",
+            "attn_implementation": "flash_attention_2",
+            "trust_remote_code": True,
+            "ignore_mismatched_sizes": True,
+        }
+        allocator_dtype = torch_dtype_for_hf_pretrained(allocator_config)
+        if allocator_dtype is not None:
+            load_kwargs["dtype"] = allocator_dtype
         self.allocator = AllocatorForConditionalGeneration.from_pretrained(
             allocator_path,
-            dtype="auto",
-            device_map="auto",
-            attn_implementation="flash_attention_2",
-            trust_remote_code=True,
-            ignore_mismatched_sizes=True
+            **load_kwargs,
         )
         self.allocator.eval()
 

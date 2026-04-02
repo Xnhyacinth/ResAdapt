@@ -46,10 +46,14 @@ class SmolAllocatorForConditionalGeneration(PreTrainedModel):
             getattr(config, "_attn_implementation", None),
             weight_dtype=weight_dtype,
         )
+        load_kwargs = {
+            "attn_implementation": attn_impl,
+        }
+        if weight_dtype is not None:
+            load_kwargs["dtype"] = weight_dtype
         self.smol_model = AutoModelForImageTextToText.from_pretrained(
             model_name,
-            dtype=weight_dtype,
-            attn_implementation=attn_impl,
+            **load_kwargs,
         )
         self.allocator = RegressionHeadAllocatorSmol(config)
 

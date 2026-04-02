@@ -59,6 +59,7 @@ def _gpu_worker_main(
     try:
         # from resadapt.allocator.modeling_allocator import AllocatorForConditionalGeneration
         from  transformers import AutoModel, AutoConfig
+        from resadapt.allocator.attention_utils import torch_dtype_for_hf_pretrained
         from resadapt.utils.utils import compute_scales_and_sample_means_cpu, _to_cpu_deep
     except Exception as e:
         print(f"[worker gpu={gpu_id}] FATAL import error: {repr(e)}", file=sys.stderr, flush=True)
@@ -83,8 +84,17 @@ def _gpu_worker_main(
                 config.min_scale = float(min_scale_override)
             except Exception:
                 pass
+        load_kwargs = {
+            "config": config,
+            "device_map": "auto",
+            "trust_remote_code": True,
+        }
+        weight_dtype = torch_dtype_for_hf_pretrained(config)
+        if weight_dtype is not None:
+            load_kwargs["dtype"] = weight_dtype
         allocator = AutoModel.from_pretrained(
-            model_path, config=config, dtype="auto", device_map="auto", trust_remote_code=True
+            model_path,
+            **load_kwargs,
         )
         allocator.eval()
     except Exception as e:

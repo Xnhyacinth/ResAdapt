@@ -30,7 +30,7 @@ def torch_dtype_for_hf_pretrained(config: Any) -> Any:
     if td is None:
         td = getattr(config, "torch_dtype", None)
     if td is None or td == "auto":
-        return "auto"
+        return None
     if isinstance(td, str):
         tdl = td.lower()
         if tdl in ("bfloat16", "bf16"):
@@ -39,7 +39,7 @@ def torch_dtype_for_hf_pretrained(config: Any) -> Any:
             return torch.float16
         if tdl in ("float32", "fp32"):
             return torch.float32
-        return "auto"
+        return None
     return td
 
 
@@ -60,8 +60,6 @@ def _flash_attn_compatible_with_weight_dtype(weight_dtype: Any) -> bool:
     """FlashAttention 2 kernels require activations/weights in fp16 or bf16 (not fp32)."""
     if weight_dtype is None:
         return True
-    if weight_dtype == "auto":
-        return False
     if isinstance(weight_dtype, str):
         tdl = weight_dtype.lower()
         return tdl in ("bfloat16", "bf16", "float16", "fp16")
